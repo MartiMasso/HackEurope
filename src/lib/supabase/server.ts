@@ -20,10 +20,14 @@ export function createServerSupabaseClient() {
         getAll() {
           return cookieStore.getAll();
         },
-        setAll(cookiesToSet) {
+        setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
           try {
             cookiesToSet.forEach(({ name, value, options }) => {
-              cookieStore.set(name, value, options as CookieOptions);
+              (cookieStore as unknown as { set: (name: string, value: string, options: CookieOptions) => void }).set(
+                name,
+                value,
+                options
+              );
             });
           } catch {
             // Ignore in server components where setting cookies is not allowed.

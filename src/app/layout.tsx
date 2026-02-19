@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { Toaster } from "sonner";
 import "./globals.css";
 import { QueryToast } from "@/components/query-toast";
@@ -16,7 +17,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <QueryToast />
+        <Suspense fallback={null}>
+          <QueryToast />
+        </Suspense>
         <Toaster position="top-right" richColors />
         {children}
       </body>
