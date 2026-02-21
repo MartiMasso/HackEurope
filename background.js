@@ -2,13 +2,13 @@ const TOGGLE_MESSAGE_TYPE = "TOGGLE_TOOLBOX_BUBBLE";
 const CHAT_MESSAGE_TYPE = "TOOLBOX_CHAT_REQUEST";
 const BACKEND_CHAT_URL = "http://127.0.0.1:8787/api/chat";
 
-async function askLocalBackend(prompt) {
+async function askLocalBackend(prompt, pageContext) {
   const response = await fetch(BACKEND_CHAT_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ prompt })
+    body: JSON.stringify({ prompt, pageContext })
   });
 
   let payload = null;
@@ -30,7 +30,10 @@ async function askLocalBackend(prompt) {
     throw new Error("El backend devolvió una respuesta vacía.");
   }
 
-  return payload.text.trim();
+  return {
+    text: payload.text.trim(),
+    chainOfThought: Array.isArray(payload.chainOfThought) ? payload.chainOfThought : []
+  };
 }
 
 chrome.action.onClicked.addListener((tab) => {
@@ -56,10 +59,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ ok: false, error: "El prompt está vacío." });
     return;
   }
+  const pageContext =
+    message.pageContext && typeof message.pageContext === "object" ? message.pageContext : null;
 
-  askLocalBackend(prompt)
-    .then((text) => {
-      sendResponse({ ok: true, text });
+  askLocalBackend(prompt, pageContext)
+    .then((result) => {
+      sendResponse({
+        ok: true,
+        text: result.text,
+        chainOfThought: result.chainOfThought
+      });
     })
     .catch((error) => {
       const messageText =

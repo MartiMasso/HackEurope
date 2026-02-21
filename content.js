@@ -7,7 +7,11 @@
   const BAR_GRADIENT_ID = "__toolbox_bottom_gradient__";
   const PANEL_ID = "__toolbox_panel__";
   const PANEL_CONTENT_ID = "__toolbox_panel_content__";
-  const TEMPLATE_POPUP_ID = "__toolbox_template_popup__";
+  const PANEL_ANSWER_ID = "__toolbox_panel_answer__";
+  const PANEL_COT_ID = "__toolbox_panel_chain_of_thought__";
+  const FLOATING_ICON_ID = "__toolbox_icon__";
+  const FLOATING_NODE_ID_PREFIX = "__toolbox_node__";
+  const FLOATING_POPUP_ID = "__toolbox_template_popup__";
   const TOGGLE_MESSAGE_TYPE = "TOGGLE_TOOLBOX_BUBBLE";
   const CHAT_MESSAGE_TYPE = "TOOLBOX_CHAT_REQUEST";
   const ICON_SRC = chrome.runtime.getURL("assets/icon.png");
@@ -20,9 +24,20 @@
   const BAR_RADIUS_PX = 27;
   const BAR_BOTTOM_PX = 18;
   const BAR_GRADIENT_HEIGHT_PX = 220;
-  const PANEL_MAX_HEIGHT_PX = 400;
+  const FLOATING_ICON_SIZE_PX = 56;
+  const FLOATING_NODE_SIZE_PX = 40;
+  const FLOATING_NODE_DISTANCE_PX = 86;
+  const FLOATING_SCREEN_MARGIN_PX = 16;
+  const FLOATING_DRAG_THRESHOLD_PX = 6;
+  const FLOATING_QUICK_CLICK_MS = 300;
+  const PANEL_MAX_HEIGHT_PX = 900;
+  const PANEL_MIN_HEIGHT_PX = 170;
+  const PANEL_MAX_HEIGHT_RATIO = 0.78;
   const PANEL_RADIUS_PX = 18;
-  const DRAG_THRESHOLD_PX = 5;
+  const BAR_DRAG_THRESHOLD_PX = 5;
+  const PAGE_CONTEXT_MAX_CHARS = 12000;
+  const PAGE_SELECTION_MAX_CHARS = 2000;
+  const PAGE_ACTIVE_ELEMENT_MAX_CHARS = 2000;
 
   /* ── animation ── */
   const SLIDE_DURATION_MS = 380;
@@ -48,12 +63,28 @@
     barBottom: BAR_BOTTOM_PX,
     barLeft: 0,        // will be centred on create
     onResize: null,
-    onKeydown: null
+    onKeydown: null,
+    floatingExpanded: false,
+    floatingCenterX: 0,
+    floatingCenterY: 0,
+    floatingNodeMap: new Map(),
+    floatingPopupCloseTimer: null,
+    floatingOnResize: null
   };
+
+  const floatingDirections = [
+    { key: "top", dx: 0, dy: -FLOATING_NODE_DISTANCE_PX, label: "TOP" },
+    { key: "left", dx: -FLOATING_NODE_DISTANCE_PX, dy: 0, label: "LEFT" },
+    { key: "right", dx: FLOATING_NODE_DISTANCE_PX, dy: 0, label: "RIGHT" },
+    { key: "bottom", dx: 0, dy: FLOATING_NODE_DISTANCE_PX, label: "BOTTOM" }
+  ];
 
   /* ── helpers ── */
   function getEl(id) {
     return document.getElementById(id);
+  }
+  function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
   }
   function getBar() {
     return getEl(BAR_CONTAINER_ID);
@@ -67,8 +98,23 @@
   function getPanelContent() {
     return getEl(PANEL_CONTENT_ID);
   }
+  function getPanelAnswer() {
+    return getEl(PANEL_ANSWER_ID);
+  }
+  function getPanelChainOfThought() {
+    return getEl(PANEL_COT_ID);
+  }
   function getBottomGradient() {
     return getEl(BAR_GRADIENT_ID);
+  }
+  function getFloatingIcon() {
+    return getEl(FLOATING_ICON_ID);
+  }
+  function getFloatingPopup() {
+    return getEl(FLOATING_POPUP_ID);
+  }
+  function getFloatingNode(key) {
+    return getEl(`${FLOATING_NODE_ID_PREFIX}_${key}`);
   }
 
   function ensureBottomGradient() {
@@ -96,6 +142,270 @@
     return gradient;
   }
 
+  function setFloatingIconPosition(left, top) {
+    const icon = getFloatingIcon();
+    if (!icon) return;
+
+    const maxLeft = Math.max(0, window.innerWidth - FLOATING_ICON_SIZE_PX);
+    const maxTop = Math.max(0, window.innerHeight - FLOATING_ICON_SIZE_PX);
+    const nextLeft = clamp(left, 0, maxLeft);
+    const nextTop = clamp(top, 0, maxTop);
+
+    icon.style.left = `${nextLeft}px`;
+    icon.style.top = `${nextTop}px`;
+    state.floatingCenterX = nextLeft + FLOATING_ICON_SIZE_PX / 2;
+    state.floatingCenterY = nextTop + FLOATING_ICON_SIZE_PX / 2;
+
+    updateFloatingNodePositions();
+  }
+
+  function showFloatingPopup(directionLabel) {
+    let popup = getFloatingPopup();
+    if (!popup) {
+      popup = document.createElement("div");
+      popup.id = FLOATING_POPUP_ID;
+
+      Object.assign(popup.style, {
+        position: "fixed",
+        top: "20px",
+        left: "50%",
+        transform: "translateX(-50%)",
+        padding: "14px 16px",
+        borderRadius: "12px",
+        background: "#111827",
+        color: "#ffffff",
+        display: "flex",
+        alignItems: "center",
+        gap: "10px",
+        boxShadow: "0 10px 28px rgba(0, 0, 0, 0.35)",
+        fontFamily: "Arial, sans-serif",
+        fontSize: "14px",
+        zIndex: "2147483647"
+      });
+
+      const image = document.createElement("img");
+      image.src = ICON_SRC;
+      image.alt = "Template";
+      Object.assign(image.style, {
+        width: "28px",
+        height: "28px",
+        objectFit: "contain",
+        flexShrink: "0"
+      });
+
+      const text = document.createElement("span");
+      text.id = `${FLOATING_POPUP_ID}_text`;
+
+      popup.appendChild(image);
+      popup.appendChild(text);
+      (document.body || document.documentElement).appendChild(popup);
+    }
+
+    const textElement = getEl(`${FLOATING_POPUP_ID}_text`);
+    if (textElement) {
+      textElement.textContent = `Template image selected: ${directionLabel}`;
+    }
+
+    if (state.floatingPopupCloseTimer) {
+      clearTimeout(state.floatingPopupCloseTimer);
+    }
+
+    state.floatingPopupCloseTimer = setTimeout(() => {
+      const currentPopup = getFloatingPopup();
+      if (currentPopup) currentPopup.remove();
+      state.floatingPopupCloseTimer = null;
+    }, 2200);
+  }
+
+  function updateFloatingNodePositions() {
+    floatingDirections.forEach(({ key, dx, dy }) => {
+      const node = state.floatingNodeMap.get(key) || getFloatingNode(key);
+      if (!node) return;
+
+      if (!state.floatingExpanded) {
+        node.style.display = "none";
+        return;
+      }
+
+      node.style.display = "flex";
+      const nodeLeft = state.floatingCenterX + dx - FLOATING_NODE_SIZE_PX / 2;
+      const nodeTop = state.floatingCenterY + dy - FLOATING_NODE_SIZE_PX / 2;
+      node.style.left = `${nodeLeft}px`;
+      node.style.top = `${nodeTop}px`;
+    });
+  }
+
+  function toggleFloatingNodes() {
+    state.floatingExpanded = !state.floatingExpanded;
+    updateFloatingNodePositions();
+  }
+
+  function createFloatingNode({ key, label }) {
+    const node = document.createElement("button");
+    node.id = `${FLOATING_NODE_ID_PREFIX}_${key}`;
+    node.type = "button";
+    node.textContent = label;
+
+    Object.assign(node.style, {
+      position: "fixed",
+      width: `${FLOATING_NODE_SIZE_PX}px`,
+      height: `${FLOATING_NODE_SIZE_PX}px`,
+      borderRadius: "9999px",
+      border: "none",
+      background: "#1f2937",
+      color: "#ffffff",
+      display: "none",
+      alignItems: "center",
+      justifyContent: "center",
+      fontFamily: "Arial, sans-serif",
+      fontSize: "10px",
+      fontWeight: "700",
+      cursor: "pointer",
+      boxShadow: "0 8px 20px rgba(0, 0, 0, 0.28)",
+      zIndex: "2147483647"
+    });
+
+    node.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showFloatingPopup(label);
+    });
+
+    state.floatingNodeMap.set(key, node);
+    (document.body || document.documentElement).appendChild(node);
+  }
+
+  function createFloatingIcon() {
+    if (getFloatingIcon()) return;
+
+    const icon = document.createElement("img");
+    icon.id = FLOATING_ICON_ID;
+    icon.src = ICON_SRC;
+    icon.alt = "Toolbox";
+    icon.draggable = false;
+
+    Object.assign(icon.style, {
+      position: "fixed",
+      top: "0px",
+      left: "0px",
+      width: `${FLOATING_ICON_SIZE_PX}px`,
+      height: `${FLOATING_ICON_SIZE_PX}px`,
+      objectFit: "contain",
+      cursor: "grab",
+      userSelect: "none",
+      WebkitUserDrag: "none",
+      pointerEvents: "auto",
+      touchAction: "none",
+      borderRadius: "9999px",
+      boxShadow: "0 10px 24px rgba(0, 0, 0, 0.28)",
+      zIndex: "2147483647"
+    });
+
+    let activePointerId = null;
+    let pointerStartX = 0;
+    let pointerStartY = 0;
+    let originLeft = 0;
+    let originTop = 0;
+    let pointerDownAt = 0;
+    let hasDragged = false;
+
+    icon.addEventListener("dragstart", (event) => {
+      event.preventDefault();
+    });
+
+    icon.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+
+      event.preventDefault();
+      icon.setPointerCapture(event.pointerId);
+      activePointerId = event.pointerId;
+      pointerStartX = event.clientX;
+      pointerStartY = event.clientY;
+      pointerDownAt = Date.now();
+      hasDragged = false;
+      const rect = icon.getBoundingClientRect();
+      originLeft = rect.left;
+      originTop = rect.top;
+      icon.style.cursor = "grabbing";
+    });
+
+    icon.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== activePointerId) return;
+
+      const dx = event.clientX - pointerStartX;
+      const dy = event.clientY - pointerStartY;
+      if (Math.hypot(dx, dy) > FLOATING_DRAG_THRESHOLD_PX) {
+        hasDragged = true;
+      }
+      if (!hasDragged) return;
+
+      setFloatingIconPosition(originLeft + dx, originTop + dy);
+    });
+
+    icon.addEventListener("pointerup", (event) => {
+      if (event.pointerId !== activePointerId) return;
+
+      icon.releasePointerCapture(event.pointerId);
+      activePointerId = null;
+      icon.style.cursor = "grab";
+
+      const clickDuration = Date.now() - pointerDownAt;
+      if (!hasDragged && clickDuration <= FLOATING_QUICK_CLICK_MS) {
+        toggleFloatingNodes();
+      }
+    });
+
+    icon.addEventListener("pointercancel", (event) => {
+      if (event.pointerId !== activePointerId) return;
+      activePointerId = null;
+      icon.style.cursor = "grab";
+    });
+
+    const mountTarget = document.body || document.documentElement;
+    if (!mountTarget) return;
+
+    mountTarget.appendChild(icon);
+    floatingDirections.forEach((direction) => createFloatingNode(direction));
+    state.floatingExpanded = false;
+
+    setFloatingIconPosition(
+      window.innerWidth - FLOATING_ICON_SIZE_PX - FLOATING_SCREEN_MARGIN_PX,
+      FLOATING_SCREEN_MARGIN_PX
+    );
+
+    state.floatingOnResize = () => {
+      const bubble = getFloatingIcon();
+      if (!bubble) return;
+      const rect = bubble.getBoundingClientRect();
+      setFloatingIconPosition(rect.left, rect.top);
+    };
+    window.addEventListener("resize", state.floatingOnResize);
+  }
+
+  function removeFloatingUI() {
+    const icon = getFloatingIcon();
+    if (icon) icon.remove();
+
+    floatingDirections.forEach(({ key }) => {
+      const node = state.floatingNodeMap.get(key) || getFloatingNode(key);
+      if (node) node.remove();
+    });
+    state.floatingNodeMap.clear();
+    state.floatingExpanded = false;
+
+    const popup = getFloatingPopup();
+    if (popup) popup.remove();
+    if (state.floatingPopupCloseTimer) {
+      clearTimeout(state.floatingPopupCloseTimer);
+      state.floatingPopupCloseTimer = null;
+    }
+
+    if (state.floatingOnResize) {
+      window.removeEventListener("resize", state.floatingOnResize);
+      state.floatingOnResize = null;
+    }
+  }
+
   /* ================================================================
    *  PLACEHOLDER STYLE  (can't style ::placeholder inline)
    * ================================================================ */
@@ -120,18 +430,264 @@
     if (s) s.remove();
   }
 
-  function setPanelContent(text, { muted = false, error = false } = {}) {
+  function truncateText(value, maxChars) {
+    if (typeof value !== "string") return "";
+    if (value.length <= maxChars) return value;
+    return `${value.slice(0, maxChars)}\n...[truncated]`;
+  }
+
+  function normalizeText(value) {
+    return (value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function isIgnoredTagName(tagName) {
+    return (
+      tagName === "SCRIPT" ||
+      tagName === "STYLE" ||
+      tagName === "NOSCRIPT" ||
+      tagName === "META" ||
+      tagName === "LINK" ||
+      tagName === "HEAD"
+    );
+  }
+
+  function isNodeInsideToolbox(node) {
+    let current = node instanceof HTMLElement ? node : node?.parentElement;
+    while (current) {
+      if (typeof current.id === "string" && current.id.startsWith("__toolbox_")) {
+        return true;
+      }
+      current = current.parentElement;
+    }
+    return false;
+  }
+
+  function isElementVisibleInViewport(element) {
+    if (!element || !(element instanceof HTMLElement)) return false;
+    if (!element.isConnected) return false;
+    if (isNodeInsideToolbox(element)) return false;
+    if (isIgnoredTagName(element.tagName)) return false;
+
+    const style = window.getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return false;
+
+    return (
+      rect.bottom > 0 &&
+      rect.right > 0 &&
+      rect.top < window.innerHeight &&
+      rect.left < window.innerWidth
+    );
+  }
+
+  function getActiveElementText() {
+    const active = document.activeElement;
+    if (!active || !(active instanceof HTMLElement)) return "";
+    if (!isElementVisibleInViewport(active)) return "";
+
+    if (active instanceof HTMLTextAreaElement) {
+      return truncateText(normalizeText(active.value), PAGE_ACTIVE_ELEMENT_MAX_CHARS);
+    }
+    if (active instanceof HTMLInputElement) {
+      const inputType = (active.type || "text").toLowerCase();
+      if (inputType === "password") return "";
+      return truncateText(normalizeText(active.value), PAGE_ACTIVE_ELEMENT_MAX_CHARS);
+    }
+    if (active.isContentEditable) {
+      return truncateText(normalizeText(active.innerText), PAGE_ACTIVE_ELEMENT_MAX_CHARS);
+    }
+
+    return "";
+  }
+
+  function getVisibleText() {
+    const root = document.body;
+    if (!root) return "";
+
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const parts = [];
+    let collectedChars = 0;
+    let lastValue = "";
+
+    while (walker.nextNode()) {
+      const textNode = walker.currentNode;
+      if (!textNode || !textNode.nodeValue) continue;
+      const parent = textNode.parentElement;
+      if (!parent) continue;
+      if (isNodeInsideToolbox(parent)) continue;
+      if (isIgnoredTagName(parent.tagName)) continue;
+      if (!isElementVisibleInViewport(parent)) continue;
+
+      const value = normalizeText(textNode.nodeValue);
+      if (!value || value === lastValue) continue;
+
+      const nextChars = collectedChars + value.length + 1;
+      if (nextChars > PAGE_CONTEXT_MAX_CHARS) break;
+
+      parts.push(value);
+      collectedChars = nextChars;
+      lastValue = value;
+    }
+
+    return parts.join("\n");
+  }
+
+  function getSelectionText() {
+    const selection = window.getSelection();
+    if (!selection) return "";
+    return truncateText(normalizeText(selection.toString()), PAGE_SELECTION_MAX_CHARS);
+  }
+
+  function buildPageContext() {
+    return {
+      url: window.location.href,
+      title: document.title || "",
+      language: document.documentElement?.lang || "",
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
+      selectionText: getSelectionText(),
+      activeElementText: getActiveElementText(),
+      visibleText: getVisibleText()
+    };
+  }
+
+  function normalizeChainOfThought(chainOfThought) {
+    if (!Array.isArray(chainOfThought)) return [];
+
+    return chainOfThought
+      .map((step) => {
+        const title = typeof step?.title === "string" ? step.title.trim() : "";
+        const items = Array.isArray(step?.items)
+          ? step.items.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean)
+          : [];
+        return { title, items };
+      })
+      .filter((step) => step.title && step.items.length > 0)
+      .slice(0, 6);
+  }
+
+  function computePanelMaxHeight() {
+    const bar = getBar();
+    const barBottom = bar ? parseFloat(bar.style.bottom) || state.barBottom : state.barBottom;
+    const availableAboveBar = Math.max(
+      110,
+      window.innerHeight - Math.max(0, barBottom) - BAR_HEIGHT_PX - 24
+    );
+    const ratioCap = Math.floor(window.innerHeight * PANEL_MAX_HEIGHT_RATIO);
+    return Math.max(110, Math.min(PANEL_MAX_HEIGHT_PX, ratioCap, availableAboveBar));
+  }
+
+  function resizePanelToContent() {
+    const panel = getPanel();
+    const panelContent = getPanelContent();
+    if (!panel || !panelContent || !state.expanded) return;
+
+    const maxHeight = computePanelMaxHeight();
+    const minHeight = Math.min(PANEL_MIN_HEIGHT_PX, maxHeight);
+    const desiredHeight = Math.min(
+      Math.max(panelContent.scrollHeight + 18, minHeight),
+      maxHeight
+    );
+
+    panel.style.maxHeight = `${Math.round(desiredHeight)}px`;
+  }
+
+  function renderChainOfThought(chainOfThought, { muted = false } = {}) {
+    const chainWrap = getPanelChainOfThought();
+    if (!chainWrap) return;
+
+    chainWrap.innerHTML = "";
+    const steps = normalizeChainOfThought(chainOfThought);
+
+    if (steps.length === 0) {
+      chainWrap.style.display = "none";
+      return;
+    }
+
+    chainWrap.style.display = "flex";
+
+    steps.forEach((step, index) => {
+      const details = document.createElement("details");
+      if (index === 0) details.open = true;
+
+      Object.assign(details.style, {
+        border: "1px solid rgba(255, 255, 255, 0.08)",
+        borderRadius: "12px",
+        background: "rgba(15, 23, 42, 0.42)",
+        overflow: "hidden",
+        opacity: muted ? "0.75" : "1"
+      });
+
+      const summary = document.createElement("summary");
+      summary.textContent = step.title;
+      Object.assign(summary.style, {
+        cursor: "pointer",
+        fontSize: "13px",
+        fontWeight: "600",
+        padding: "10px 12px",
+        color: "rgba(226, 232, 240, 0.95)",
+        listStylePosition: "inside",
+        userSelect: "none"
+      });
+
+      const list = document.createElement("ul");
+      Object.assign(list.style, {
+        margin: "0",
+        padding: "0 18px 12px 30px",
+        color: "rgba(203, 213, 225, 0.95)"
+      });
+
+      step.items.forEach((item) => {
+        const li = document.createElement("li");
+        li.textContent = item;
+        li.style.marginBottom = "6px";
+        li.style.fontSize = "13px";
+        li.style.lineHeight = "1.45";
+        list.appendChild(li);
+      });
+
+      details.appendChild(summary);
+      details.appendChild(list);
+      details.addEventListener("toggle", () => {
+        if (state.expanded) requestAnimationFrame(resizePanelToContent);
+      });
+      chainWrap.appendChild(details);
+    });
+  }
+
+  function setPanelContent(text, { muted = false, error = false, chainOfThought = [] } = {}) {
     const panelContent = getPanelContent();
     if (!panelContent) return;
 
-    panelContent.textContent = text;
-    panelContent.style.opacity = muted ? "0.6" : "1";
-    panelContent.style.color = error ? "#fca5a5" : INPUT_COLOR;
+    const answer = getPanelAnswer();
+    if (!answer) {
+      panelContent.textContent = text;
+      panelContent.style.opacity = muted ? "0.6" : "1";
+      panelContent.style.color = error ? "#fca5a5" : INPUT_COLOR;
+      if (state.expanded) requestAnimationFrame(resizePanelToContent);
+      return;
+    }
+
+    answer.textContent = text;
+    answer.style.opacity = muted ? "0.75" : "1";
+    answer.style.color = error ? "#fca5a5" : INPUT_COLOR;
+    answer.style.borderColor = error ? "rgba(252, 165, 165, 0.45)" : "rgba(255, 255, 255, 0.08)";
+    answer.style.background = error ? "rgba(127, 29, 29, 0.26)" : "rgba(15, 23, 42, 0.35)";
+
+    renderChainOfThought(chainOfThought, { muted });
+
+    if (state.expanded) requestAnimationFrame(resizePanelToContent);
   }
 
-  function requestChatAnswer(prompt) {
+  function requestChatAnswer(prompt, pageContext) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: CHAT_MESSAGE_TYPE, prompt }, (response) => {
+      chrome.runtime.sendMessage({ type: CHAT_MESSAGE_TYPE, prompt, pageContext }, (response) => {
         if (chrome.runtime.lastError) {
           reject(new Error("No se pudo contactar con la extensión. Recárgala e inténtalo de nuevo."));
           return;
@@ -146,7 +702,10 @@
           return;
         }
 
-        resolve(response.text);
+        resolve({
+          text: response.text,
+          chainOfThought: Array.isArray(response.chainOfThought) ? response.chainOfThought : []
+        });
       });
     });
   }
@@ -161,21 +720,45 @@
     const requestId = ++state.requestId;
     state.pending = true;
     input.disabled = true;
+    const pageContext = buildPageContext();
+    const loadingChain = [
+      {
+        title: "Reading what you are viewing",
+        items: [
+          pageContext.title
+            ? `Current page: ${truncateText(pageContext.title, 120)}`
+            : "Collecting visible page title and URL.",
+          pageContext.selectionText
+            ? "Using your selected text as high-priority context."
+            : "No selected text detected; using visible content."
+        ]
+      },
+      {
+        title: "Preparing a detailed answer",
+        items: [
+          "Grounding the response in page context when relevant.",
+          "Building a concise reasoning summary."
+        ]
+      }
+    ];
 
     if (!state.expanded) expandPanel();
-    setPanelContent("Pensando...", { muted: true });
+    setPanelContent("Analyzing your request with page context...", {
+      muted: true,
+      chainOfThought: loadingChain
+    });
 
     try {
-      const answer = await requestChatAnswer(prompt);
+      const result = await requestChatAnswer(prompt, pageContext);
       if (requestId !== state.requestId) return;
-      setPanelContent(answer);
+      setPanelContent(result.text, { chainOfThought: result.chainOfThought });
     } catch (error) {
       if (requestId !== state.requestId) return;
       const message =
         error instanceof Error && error.message
           ? error.message
           : "No se pudo obtener respuesta.";
-      setPanelContent(`Error: ${message}`, { error: true });
+      setPanelContent(`Error: ${message}`, { error: true, chainOfThought: [] });
     } finally {
       if (requestId !== state.requestId) return;
       state.pending = false;
@@ -191,6 +774,7 @@
   function createBar() {
     injectPlaceholderStyle();
     const gradient = ensureBottomGradient();
+    createFloatingIcon();
 
     /* ── container (pill bar) ── */
     const bar = document.createElement("div");
@@ -337,12 +921,37 @@
     panelInner.id = PANEL_CONTENT_ID;
     Object.assign(panelInner.style, {
       padding: "20px 0",
-      opacity: "0.5",
-      textAlign: "left",
-      whiteSpace: "pre-wrap",
-      wordBreak: "break-word"
+      display: "flex",
+      flexDirection: "column",
+      gap: "12px"
     });
-    panelInner.textContent = "Escribe una pregunta y pulsa Enter para hablar con la IA.";
+
+    const answer = document.createElement("div");
+    answer.id = PANEL_ANSWER_ID;
+    Object.assign(answer.style, {
+      border: "1px solid rgba(255, 255, 255, 0.08)",
+      borderRadius: "14px",
+      background: "rgba(15, 23, 42, 0.35)",
+      padding: "14px 14px",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word",
+      color: "rgba(226, 232, 240, 0.95)",
+      opacity: "0.78",
+      fontSize: "14px",
+      lineHeight: "1.55"
+    });
+    answer.textContent = "Ask a question and press Enter.";
+
+    const chainWrap = document.createElement("div");
+    chainWrap.id = PANEL_COT_ID;
+    Object.assign(chainWrap.style, {
+      display: "none",
+      flexDirection: "column",
+      gap: "8px"
+    });
+
+    panelInner.appendChild(answer);
+    panelInner.appendChild(chainWrap);
     panel.appendChild(panelInner);
 
     bar.appendChild(panel);
@@ -379,7 +988,7 @@
       const dx = e.clientX - pStartX;
       const dy = e.clientY - pStartY;
 
-      if (!hasDragged && Math.hypot(dx, dy) > DRAG_THRESHOLD_PX) {
+      if (!hasDragged && Math.hypot(dx, dy) > BAR_DRAG_THRESHOLD_PX) {
         hasDragged = true;
       }
       if (!hasDragged) return;
@@ -391,6 +1000,7 @@
       bar.style.bottom = `${newBottom}px`;
       state.barLeft = newLeft;
       state.barBottom = newBottom;
+      if (state.expanded) resizePanelToContent();
     });
 
     bar.addEventListener("pointerup", (e) => {
@@ -451,6 +1061,7 @@
         state.barLeft = maxLeft;
         b.style.left = `${maxLeft}px`;
       }
+      if (state.expanded) resizePanelToContent();
     };
     window.addEventListener("resize", state.onResize);
 
@@ -465,9 +1076,9 @@
     if (!panel) return;
 
     state.expanded = true;
-    panel.style.maxHeight = `${PANEL_MAX_HEIGHT_PX}px`;
     panel.style.opacity = "1";
     panel.style.padding = "0 20px";
+    requestAnimationFrame(resizePanelToContent);
   }
 
   function collapsePanel() {
@@ -494,6 +1105,7 @@
 
     /* first collapse panel if open */
     if (state.expanded) collapsePanel();
+    removeFloatingUI();
 
     /* restore transition in case it was removed during drag */
     bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
@@ -517,6 +1129,7 @@
     if (bar) bar.remove();
     const gradient = getBottomGradient();
     if (gradient) gradient.remove();
+    removeFloatingUI();
 
     removePlaceholderStyle();
 

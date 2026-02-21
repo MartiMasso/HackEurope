@@ -36,7 +36,7 @@ npm install
 ```env
 OPENAI_API_KEY=tu_clave_real_de_openai
 OPENAI_MODEL=gpt-4o-mini
-OPENAI_MAX_OUTPUT_TOKENS=700
+OPENAI_MAX_OUTPUT_TOKENS=1400
 BACKEND_PORT=8787
 ```
 
@@ -66,13 +66,29 @@ curl http://127.0.0.1:8787/health
 3. Escribe un prompt y pulsa Enter (o botón de envío).
 4. La respuesta aparece en el panel superior de la barra.
 
+La UI de respuesta ahora incluye:
+- Espacio de respuesta que se expande automáticamente cuando el contenido es largo.
+- Sección `Chain of thought` (resumen por pasos plegables).
+
+En cada prompt, la extensión adjunta contexto de la página actual:
+- URL y título.
+- Texto seleccionado (si hay).
+- Texto del campo enfocado (si estás escribiendo en un editor/input).
+- Texto visible en el viewport (lo que estás viendo en pantalla).
+
 ## Flujo técnico
 
 1. `content.js` captura el prompt.
-2. `content.js` envía mensaje a `background.js`.
-3. `background.js` llama a `http://127.0.0.1:8787/api/chat`.
-4. `backend/server.js` llama a OpenAI con `OPENAI_API_KEY`.
-5. El texto vuelve a la UI.
+2. `content.js` extrae contexto visible de la página.
+3. `content.js` envía prompt + contexto a `background.js`.
+4. `background.js` llama a `http://127.0.0.1:8787/api/chat`.
+5. `backend/server.js` llama a OpenAI con `OPENAI_API_KEY`.
+6. El backend devuelve `answer + chainOfThought`.
+7. La UI renderiza respuesta + pasos y ajusta la altura del panel dinámicamente.
+
+## Privacidad
+
+El contexto visible de la página se envía a tu backend local y desde ahí a OpenAI para responder mejor.
 
 ## Debug rápido
 
