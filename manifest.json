@@ -1,19 +1,30 @@
 {
   "manifest_version": 3,
-  "name": "Toolbox Floating Icon",
-  "description": "MVP extension that toggles a draggable floating icon on the current page.",
-  "version": "0.1.0",
-  "permissions": ["tabs"],
+  "name": "Toolbox Search Bar",
+  "description": "Toggle a Google Assistant-style search bar on any page via toolbar click or Ctrl+Shift+Space.",
+  "version": "0.2.0",
+  "permissions": [
+    "tabs"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Toggle Toolbox Floating Icon",
+    "default_title": "Toggle Toolbox Search Bar",
     "default_icon": {
       "16": "assets/logo1.png",
       "32": "assets/logo1.png",
       "48": "assets/logo1.png",
       "128": "assets/logo1.png"
+    }
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Space",
+        "mac": "Command+Shift+Space"
+      },
+      "description": "Toggle the search bar"
     }
   },
   "icons": {
@@ -24,15 +35,23 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["assets/icon.png"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "assets/icon.png"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ]
 }
