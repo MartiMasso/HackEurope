@@ -1,6 +1,6 @@
-# Toolbox Bubble Toggle (Chrome Extension MV3)
+# Toolbox Floating Icon (Chrome Extension MV3)
 
-MVP de una extensión de Google Chrome (Manifest V3) que, al hacer click en el icono, hace toggle de una bolita flotante (`TB`) en la pestaña activa.
+MVP de una extensión de Google Chrome (Manifest V3) que, al hacer click en el icono, hace toggle de un icono flotante arrastrable en la pestaña activa.
 
 ## Estructura
 
@@ -25,16 +25,17 @@ MVP de una extensión de Google Chrome (Manifest V3) que, al hacer click en el i
 ## Recargar la extensión
 
 1. Ve a `chrome://extensions/`.
-2. En la tarjeta de **Toolbox Bubble Toggle**, pulsa el botón **Reload**.
+2. En la tarjeta de **Toolbox Floating Icon**, pulsa el botón **Reload**.
 3. Refresca cualquier pestaña donde quieras probarla.
 
 ## Uso
 
 1. Abre cualquier página web normal (`http` o `https`).
 2. Haz click en el icono de la extensión.
-3. Se crea o elimina la bolita flotante con id `__toolbox_bubble__` en la esquina inferior derecha.
+3. Se crea o elimina el icono flotante con id `__toolbox_icon__` en la esquina superior derecha.
+4. Puedes arrastrarlo con el ratón para moverlo por la pantalla.
 
-Nota: en páginas restringidas (`chrome://`, Chrome Web Store, etc.) Chrome bloquea content scripts; ahí no se mostrará la bolita.
+Nota: en páginas restringidas (`chrome://`, Chrome Web Store, etc.) Chrome bloquea content scripts; ahí no se mostrará el icono flotante.
 
 ## Depurar Service Worker (background.js)
 
@@ -51,5 +52,5 @@ Nota: en páginas restringidas (`chrome://`, Chrome Web Store, etc.) Chrome bloq
 
 ## Icono
 
-La extensión usa `assets/logo1.png` como icono en todos los tamaños declarados en `manifest.json`.
-`assets/icon.png` se deja como copia de compatibilidad con el requisito de archivo mínimo.
+La UI flotante en la página usa `assets/icon.png`.
+El icono de la acción de la extensión en la toolbar usa `assets/logo1.png` (declarado en `manifest.json`).

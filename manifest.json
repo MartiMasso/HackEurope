@@ -1,14 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "Toolbox Bubble Toggle",
-  "description": "MVP extension that toggles a floating bubble on the current page.",
+  "name": "Toolbox Floating Icon",
+  "description": "MVP extension that toggles a draggable floating icon on the current page.",
   "version": "0.1.0",
   "permissions": ["tabs"],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Toggle Toolbox Bubble",
+    "default_title": "Toggle Toolbox Floating Icon",
     "default_icon": {
       "16": "assets/logo1.png",
       "32": "assets/logo1.png",
