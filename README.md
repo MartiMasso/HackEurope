@@ -67,6 +67,7 @@ curl http://127.0.0.1:8787/health
 4. Pulsa el nodo `BOTTOM` para abrir el chat.
 5. Escribe un prompt y pulsa Enter (o botón de envío).
 6. La respuesta aparece en el panel superior de la barra.
+7. En la barra del chat, pulsa el icono de la izquierda para desplegar 4 herramientas visuales (demo).
 
 Captura de pantalla parcial:
 - Pulsa el nodo `LEFT` del icono flotante.

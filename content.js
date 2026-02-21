@@ -10,6 +10,8 @@
   const PANEL_ANSWER_ID = "__toolbox_panel_answer__";
   const PANEL_COT_ID = "__toolbox_panel_chain_of_thought__";
   const BAR_ATTACHMENTS_ID = "__toolbox_bar_attachments__";
+  const BAR_FEATURE_TOGGLE_ID = "__toolbox_bar_feature_toggle__";
+  const BAR_FEATURE_TRAY_ID = "__toolbox_bar_feature_tray__";
   const FLOATING_ICON_ID = "__toolbox_icon__";
   const FLOATING_NODE_ID_PREFIX = "__toolbox_node__";
   const FLOATING_POPUP_ID = "__toolbox_template_popup__";
@@ -36,6 +38,8 @@
   const FLOATING_QUICK_CLICK_MS = 300;
   const SCREENSHOT_MIN_SELECTION_PX = 14;
   const SCREENSHOT_MAX_SIDE_PX = 1400;
+  const FEATURE_TRAY_OPEN_WIDTH_PX = 172;
+  const FEATURE_BUTTON_SIZE_PX = 28;
   const PANEL_MAX_HEIGHT_PX = 900;
   const PANEL_MIN_HEIGHT_PX = 170;
   const PANEL_MAX_HEIGHT_RATIO = 0.78;
@@ -77,6 +81,7 @@
     floatingPopupCloseTimer: null,
     floatingOnResize: null,
     imageAttachment: null,
+    featureTrayOpen: false,
     screenCaptureCleanup: null,
     screenCaptureInProgress: false
   };
@@ -86,6 +91,33 @@
     { key: "left", dx: -FLOATING_NODE_DISTANCE_PX, dy: 0, label: "LEFT" },
     { key: "right", dx: FLOATING_NODE_DISTANCE_PX, dy: 0, label: "RIGHT" },
     { key: "bottom", dx: 0, dy: FLOATING_NODE_DISTANCE_PX, label: "BOTTOM" }
+  ];
+
+  const chatFeatureItems = [
+    {
+      key: "summarize",
+      label: "Summarize",
+      icon:
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dbeafe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h10"/></svg>'
+    },
+    {
+      key: "translate",
+      label: "Translate",
+      icon:
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dbeafe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14"/><path d="M12 4v3"/><path d="M9 20l3-7 3 7"/><path d="M17 10c0 3-2 6-5 8"/></svg>'
+    },
+    {
+      key: "code",
+      label: "Code",
+      icon:
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dbeafe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6"/><path d="M8 6l-6 6 6 6"/></svg>'
+    },
+    {
+      key: "vision",
+      label: "Vision",
+      icon:
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dbeafe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="3"/></svg>'
+    }
   ];
 
   /* ── helpers ── */
@@ -115,6 +147,12 @@
   }
   function getAttachmentStrip() {
     return getEl(BAR_ATTACHMENTS_ID);
+  }
+  function getFeatureToggle() {
+    return getEl(BAR_FEATURE_TOGGLE_ID);
+  }
+  function getFeatureTray() {
+    return getEl(BAR_FEATURE_TRAY_ID);
   }
   function getBottomGradient() {
     return getEl(BAR_GRADIENT_ID);
@@ -557,6 +595,25 @@
   function clearImageAttachment() {
     state.imageAttachment = null;
     renderAttachmentStrip();
+  }
+
+  function setFeatureTrayOpen(open) {
+    const tray = getFeatureTray();
+    const toggle = getFeatureToggle();
+    const nextOpen = Boolean(open);
+    state.featureTrayOpen = nextOpen;
+
+    if (!tray || !toggle) return;
+
+    tray.style.maxWidth = nextOpen ? `${FEATURE_TRAY_OPEN_WIDTH_PX}px` : "0px";
+    tray.style.opacity = nextOpen ? "1" : "0";
+    tray.style.transform = nextOpen ? "translateX(0)" : "translateX(-8px)";
+    tray.style.marginRight = nextOpen ? "2px" : "0";
+    toggle.style.background = nextOpen ? "rgba(99, 102, 241, 0.40)" : "rgba(99, 102, 241, 0.20)";
+    toggle.style.borderColor = nextOpen
+      ? "rgba(191, 219, 254, 0.45)"
+      : "rgba(148, 163, 184, 0.28)";
+    toggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
   }
 
   function requestVisibleTabCapture() {
@@ -1242,18 +1299,105 @@
       boxSizing: "border-box"
     });
 
-    /* ── icon ── */
+    /* ── feature toggle icon ── */
+    const featureToggle = document.createElement("button");
+    featureToggle.id = BAR_FEATURE_TOGGLE_ID;
+    featureToggle.type = "button";
+    featureToggle.setAttribute("aria-label", "Open tools");
+    featureToggle.setAttribute("aria-expanded", "false");
+    Object.assign(featureToggle.style, {
+      width: "34px",
+      height: "34px",
+      borderRadius: "50%",
+      border: "1px solid rgba(148, 163, 184, 0.28)",
+      background: "rgba(99, 102, 241, 0.20)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: "0",
+      margin: "0",
+      cursor: "pointer",
+      flexShrink: "0",
+      transition: "background 150ms ease, border-color 150ms ease"
+    });
+    featureToggle.addEventListener("pointerdown", (event) => event.stopPropagation());
+
     const icon = document.createElement("img");
     icon.src = ICON_SRC;
     icon.alt = "Toolbox";
     icon.draggable = false;
     Object.assign(icon.style, {
-      width: "30px",
-      height: "30px",
+      width: "24px",
+      height: "24px",
       objectFit: "contain",
-      flexShrink: "0",
       pointerEvents: "none",
       borderRadius: "50%"
+    });
+    featureToggle.appendChild(icon);
+
+    const featureTray = document.createElement("div");
+    featureTray.id = BAR_FEATURE_TRAY_ID;
+    Object.assign(featureTray.style, {
+      display: "flex",
+      alignItems: "center",
+      gap: "6px",
+      overflow: "hidden",
+      maxWidth: "0px",
+      opacity: "0",
+      transform: "translateX(-8px)",
+      transition: "max-width 220ms ease, opacity 180ms ease, transform 180ms ease, margin-right 180ms ease",
+      marginRight: "0",
+      border: "1px solid rgba(148, 163, 184, 0.2)",
+      borderRadius: "9999px",
+      background:
+        "linear-gradient(135deg, rgba(30, 41, 59, 0.92) 0%, rgba(15, 23, 42, 0.84) 100%)",
+      padding: "4px 7px",
+      flexShrink: "0"
+    });
+    featureTray.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+    chatFeatureItems.forEach((item) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.title = item.label;
+      button.setAttribute("aria-label", item.label);
+      button.innerHTML = item.icon;
+      Object.assign(button.style, {
+        width: `${FEATURE_BUTTON_SIZE_PX}px`,
+        height: `${FEATURE_BUTTON_SIZE_PX}px`,
+        borderRadius: "9999px",
+        border: "1px solid rgba(191, 219, 254, 0.25)",
+        background: "rgba(30, 64, 175, 0.25)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "0",
+        margin: "0",
+        cursor: "pointer",
+        transition: "transform 120ms ease, background 150ms ease, border-color 150ms ease"
+      });
+      button.addEventListener("pointerdown", (event) => event.stopPropagation());
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      button.addEventListener("pointerenter", () => {
+        button.style.background = "rgba(59, 130, 246, 0.34)";
+        button.style.borderColor = "rgba(191, 219, 254, 0.48)";
+        button.style.transform = "translateY(-1px)";
+      });
+      button.addEventListener("pointerleave", () => {
+        button.style.background = "rgba(30, 64, 175, 0.25)";
+        button.style.borderColor = "rgba(191, 219, 254, 0.25)";
+        button.style.transform = "translateY(0)";
+      });
+      featureTray.appendChild(button);
+    });
+
+    featureToggle.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setFeatureTrayOpen(!state.featureTrayOpen);
     });
 
     const attachmentStrip = document.createElement("div");
@@ -1327,7 +1471,8 @@
       sendHint.style.background = "rgba(99, 102, 241, 0.25)";
     });
 
-    bar.appendChild(icon);
+    bar.appendChild(featureToggle);
+    bar.appendChild(featureTray);
     bar.appendChild(attachmentStrip);
     bar.appendChild(input);
     bar.appendChild(sendHint);
@@ -1465,6 +1610,7 @@
 
     /* ── mount ── */
     (document.body || document.documentElement).appendChild(bar);
+    setFeatureTrayOpen(false);
     renderAttachmentStrip();
 
     /* slide in */
@@ -1487,7 +1633,9 @@
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        if (state.expanded) {
+        if (state.featureTrayOpen) {
+          setFeatureTrayOpen(false);
+        } else if (state.expanded) {
           collapsePanel();
         } else {
           dismissBar();
@@ -1550,6 +1698,7 @@
 
     /* first collapse panel if open */
     if (state.expanded) collapsePanel();
+    setFeatureTrayOpen(false);
 
     /* restore transition in case it was removed during drag */
     bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
@@ -1577,6 +1726,7 @@
       clearImageAttachment();
       removeFloatingUI();
     }
+    state.featureTrayOpen = false;
 
     removePlaceholderStyle();
 
