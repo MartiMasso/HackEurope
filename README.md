@@ -1,6 +1,6 @@
 # Toolbox Floating Icon (Chrome Extension MV3)
 
-MVP de una extensión de Google Chrome (Manifest V3) que, al hacer click en el icono, hace toggle de un icono flotante arrastrable en la pestaña activa.
+MVP de una extensión de Google Chrome (Manifest V3) que, al hacer click en el icono, hace toggle de una burbuja con imagen flotante arrastrable en la pestaña activa.
 
 ## Estructura
 
@@ -30,12 +30,14 @@ MVP de una extensión de Google Chrome (Manifest V3) que, al hacer click en el i
 
 ## Uso
 
-1. Abre cualquier página web normal (`http` o `https`).
+1. Abre cualquier página web permitida por Chrome (`http`, `https`, etc.).
 2. Haz click en el icono de la extensión.
-3. Se crea o elimina el icono flotante con id `__toolbox_icon__` en la esquina superior derecha.
-4. Puedes arrastrarlo con el ratón para moverlo por la pantalla.
+3. Se crea o elimina la burbuja flotante con id `__toolbox_icon__` usando `assets/icon.png`.
+4. Puedes arrastrarla con el ratón para moverla por toda la pantalla.
+5. Si haces click rápido en la burbuja, se expande como neurona con 4 círculos (`TOP`, `LEFT`, `RIGHT`, `BOTTOM`).
+6. Cada círculo es clicable y muestra un popup temporal con un mensaje y una imagen de plantilla.
 
-Nota: en páginas restringidas (`chrome://`, Chrome Web Store, etc.) Chrome bloquea content scripts; ahí no se mostrará el icono flotante.
+Nota: en páginas restringidas (`chrome://`, Chrome Web Store, etc.) Chrome bloquea content scripts; ahí no se puede inyectar la burbuja por limitación del navegador.
 
 ## Depurar Service Worker (background.js)
 
