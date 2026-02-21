@@ -5,7 +5,8 @@
   "version": "0.2.0",
   "permissions": [
     "tabs",
-    "activeTab"
+    "activeTab",
+    "storage"
   ],
   "host_permissions": [
     "http://127.0.0.1:8787/*",

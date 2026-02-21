@@ -27,6 +27,8 @@ const AGENT_ELEMENT_TEXT_MAX_CHARS = 120;
 const AGENT_HISTORY_MAX_ITEMS = 8;
 const AGENT_HISTORY_TEXT_MAX_CHARS = 220;
 const AGENT_GOAL_MAX_CHARS = 800;
+const AGENT_REPEAT_ACTION_THRESHOLD = 2;
+const AGENT_SCREENSHOT_MAX_DATA_URL_CHARS = 7_000_000;
 
 if (typeof fetch !== "function") {
   console.error("Node 18+ is required because global fetch is missing.");
@@ -165,6 +167,37 @@ function buildAttachmentContextText(attachments) {
     .join("\n");
 }
 
+function normalizeAgentScreenshot(rawScreenshot) {
+  if (!rawScreenshot || typeof rawScreenshot !== "object") return null;
+  const dataUrl = typeof rawScreenshot.dataUrl === "string" ? rawScreenshot.dataUrl.trim() : "";
+  if (!dataUrl || dataUrl.length > AGENT_SCREENSHOT_MAX_DATA_URL_CHARS) return null;
+
+  const mimeMatch = /^data:(image\/(?:png|jpeg|jpg|webp));base64,/i.exec(dataUrl);
+  if (!mimeMatch) return null;
+
+  const mimeType = mimeMatch[1].toLowerCase();
+  const width = Number.isFinite(rawScreenshot.width)
+    ? Math.max(1, Math.floor(rawScreenshot.width))
+    : null;
+  const height = Number.isFinite(rawScreenshot.height)
+    ? Math.max(1, Math.floor(rawScreenshot.height))
+    : null;
+
+  return {
+    dataUrl,
+    mimeType,
+    width,
+    height
+  };
+}
+
+function buildAgentScreenshotContextText(screenshot) {
+  if (!screenshot) return "No viewport screenshot attached for this step.";
+  const sizeText =
+    screenshot.width && screenshot.height ? `${screenshot.width}x${screenshot.height}` : "unknown-size";
+  return `Viewport screenshot attached (${screenshot.mimeType}, ${sizeText}).`;
+}
+
 function buildPromptWithContext(prompt, pageContext, attachments) {
   const pageContextText = buildPageContextText(pageContext);
   const attachmentContextText = buildAttachmentContextText(attachments);
@@ -213,7 +246,13 @@ function normalizeActionableElements(rawElements) {
         text: truncateText(item.text, AGENT_ELEMENT_TEXT_MAX_CHARS),
         placeholder: truncateText(item.placeholder, 90),
         type: truncateText(item.type, 30),
-        role: truncateText(item.role, 30)
+        role: truncateText(item.role, 30),
+        name: truncateText(item.name, 60),
+        idAttr: truncateText(item.idAttr, 60),
+        goalMatchScore: Number.isFinite(item.goalMatchScore)
+          ? Math.max(0, Math.min(12, Math.floor(item.goalMatchScore)))
+          : 0,
+        likelySearch: item.likelySearch === true
       };
     })
     .filter(Boolean)
@@ -230,8 +269,12 @@ function buildActionableElementsText(actionableElements) {
       const parts = [`id=${item.id}`, `tag=${item.tag || "unknown"}`];
       if (item.role) parts.push(`role=${item.role}`);
       if (item.type) parts.push(`type=${item.type}`);
+      if (item.name) parts.push(`name=${item.name}`);
+      if (item.idAttr) parts.push(`id=${item.idAttr}`);
       if (item.text) parts.push(`text=${item.text}`);
       if (item.placeholder) parts.push(`placeholder=${item.placeholder}`);
+      if (item.goalMatchScore > 0) parts.push(`goalMatchScore=${item.goalMatchScore}`);
+      if (item.likelySearch) parts.push("likelySearch=true");
       return parts.join(" | ");
     })
     .join("\n");
@@ -244,7 +287,7 @@ function normalizeAgentHistory(rawHistory) {
     .map((step) => {
       if (!step || typeof step !== "object") return null;
       const stepNumber = Number.isFinite(step.step) ? Math.max(1, Math.floor(step.step)) : null;
-      const action = truncateText(step.action, 60);
+      const action = truncateText(step.action, 140);
       const result = truncateText(step.result, AGENT_HISTORY_TEXT_MAX_CHARS);
       if (!stepNumber && !action && !result) return null;
 
@@ -273,29 +316,102 @@ function buildAgentHistoryText(history) {
     .join("\n");
 }
 
-function buildAgentModelInput(goal, pageContext, actionableElements, history) {
+function normalizeAgentMetadata(rawMetadata) {
+  if (!rawMetadata || typeof rawMetadata !== "object") {
+    return {
+      step: null,
+      maxSteps: null,
+      stallCount: 0,
+      forceFinish: false,
+      goalKeywords: [],
+      hasScreenshot: false
+    };
+  }
+
+  const step = Number.isFinite(rawMetadata.step) ? Math.max(1, Math.floor(rawMetadata.step)) : null;
+  const maxSteps = Number.isFinite(rawMetadata.maxSteps)
+    ? Math.max(1, Math.floor(rawMetadata.maxSteps))
+    : null;
+  const stallCount = Number.isFinite(rawMetadata.stallCount)
+    ? Math.max(0, Math.floor(rawMetadata.stallCount))
+    : 0;
+  const goalKeywords = Array.isArray(rawMetadata.goalKeywords)
+    ? rawMetadata.goalKeywords
+        .map((value) => truncateText(value, 40).toLowerCase())
+        .filter(Boolean)
+        .slice(0, 8)
+    : [];
+
+  return {
+    step,
+    maxSteps,
+    stallCount,
+    forceFinish: rawMetadata.forceFinish === true,
+    goalKeywords,
+    hasScreenshot: rawMetadata.hasScreenshot === true
+  };
+}
+
+function buildAgentMetadataText(metadata) {
+  if (!metadata || typeof metadata !== "object") {
+    return "No metadata.";
+  }
+
+  const parts = [];
+  if (metadata.step) parts.push(`step=${metadata.step}`);
+  if (metadata.maxSteps) parts.push(`maxSteps=${metadata.maxSteps}`);
+  parts.push(`stallCount=${metadata.stallCount || 0}`);
+  parts.push(`forceFinish=${metadata.forceFinish === true ? "true" : "false"}`);
+  parts.push(`hasScreenshot=${metadata.hasScreenshot === true ? "true" : "false"}`);
+  if (Array.isArray(metadata.goalKeywords) && metadata.goalKeywords.length > 0) {
+    parts.push(`goalKeywords=${metadata.goalKeywords.join(",")}`);
+  }
+  return parts.join(" | ");
+}
+
+function detectRecentRepeatedAction(history, threshold = AGENT_REPEAT_ACTION_THRESHOLD) {
+  if (!Array.isArray(history) || history.length < threshold) return "";
+  const recent = history.slice(-threshold);
+  const firstAction = toTrimmedString(recent[0]?.action);
+  if (!firstAction) return "";
+
+  const allEqual = recent.every((step) => toTrimmedString(step?.action) === firstAction);
+  return allEqual ? firstAction : "";
+}
+
+function buildAgentModelInput(goal, pageContext, actionableElements, history, metadata, screenshot) {
   const safeGoal = truncateText(goal, AGENT_GOAL_MAX_CHARS);
   const pageContextText = buildPageContextText(pageContext);
   const elementsText = buildActionableElementsText(actionableElements);
   const historyText = buildAgentHistoryText(history);
+  const metadataText = buildAgentMetadataText(metadata);
+  const screenshotText = buildAgentScreenshotContextText(screenshot);
 
   return [
     "Return ONLY valid JSON with this shape:",
-    '{ "reasoning": "string", "action": { "type": "scroll|click_element|type_in_element|wait|finish", "...": "..." }, "message": "string optional" }',
+    '{ "reasoning": "string", "action": { "type": "scroll|click_element|type_in_element|wait|press_enter|finish", "...": "..." }, "message": "string optional" }',
     "",
     "Rules:",
     "- You are choosing the NEXT best browser action to complete the user goal.",
-    "- The page can change between steps, so prefer robust incremental actions.",
+    "- The page can change between steps; prefer robust and incremental actions.",
+    "- Follow a clear progression: locate target input/list, perform search/filter, inspect best candidate, verify result, then finish.",
     "- Use only element IDs listed in [Actionable elements] for click/type actions.",
-    "- Choose finish when the goal is achieved or impossible with the current page context.",
+    "- Prioritize elements with higher goalMatchScore and text that matches goal keywords.",
+    "- Avoid clicking controls that likely reload or refresh the page unless the user explicitly requested refresh.",
+    "- Never repeat the exact same action if recent steps already did it without progress.",
+    "- If [Execution metadata] forceFinish=true OR step is at the end, choose finish with a concrete message.",
+    "- Choose finish when the goal is achieved, blocked, or cannot progress safely.",
+    "- If a viewport screenshot is attached, use it as primary evidence of what is visible now.",
     "- Keep reasoning concise (1 sentence).",
     "",
     "Action parameter rules:",
     '- scroll: { "type": "scroll", "direction": "up"|"down", "amount": number }',
     '- click_element: { "type": "click_element", "elementId": "el_..." }',
     '- type_in_element: { "type": "type_in_element", "elementId": "el_...", "text": "string", "submit": true|false, "clear": true|false }',
+    '- press_enter: { "type": "press_enter", "elementId": "el_..." } or omit elementId to use focused element.',
     '- wait: { "type": "wait", "ms": number }',
     '- finish: { "type": "finish" } and include "message" summarizing outcome.',
+    "- When writing in a likely search field, set submit=true unless there is a clear reason not to submit.",
     "",
     "[User goal]",
     safeGoal || "No goal provided.",
@@ -305,6 +421,12 @@ function buildAgentModelInput(goal, pageContext, actionableElements, history) {
     "",
     "[Actionable elements]",
     elementsText,
+    "",
+    "[Execution metadata]",
+    metadataText,
+    "",
+    "[Viewport screenshot]",
+    screenshotText,
     "",
     "[Previous steps]",
     historyText
@@ -477,6 +599,11 @@ function normalizeAgentAction(action) {
       submit: action.submit === true,
       clear: action.clear !== false
     };
+  }
+
+  if (type === "press_enter") {
+    const elementId = truncateText(action.elementId || action.element_id, 40);
+    return elementId ? { type: "press_enter", elementId } : { type: "press_enter" };
   }
 
   if (type === "wait") {
@@ -655,12 +782,46 @@ app.post("/api/agent/step", async (req, res) => {
       : null;
   const actionableElements = normalizeActionableElements(req.body?.actionableElements);
   const history = normalizeAgentHistory(req.body?.history);
-  const modelInput = buildAgentModelInput(goal, pageContext, actionableElements, history);
+  const metadata = normalizeAgentMetadata(req.body?.metadata);
+  const screenshot = normalizeAgentScreenshot(req.body?.screenshot);
+
+  if (metadata.forceFinish && history.length > 0) {
+    const latestResult = history[history.length - 1]?.result || "";
+    res.json({
+      action: { type: "finish" },
+      reasoning: "Ending run because force-finish was requested by the controller.",
+      message: latestResult
+        ? `Stopped to avoid extra loop. Last observed result: ${latestResult}`
+        : "Stopped to avoid extra loop and return a final summary."
+    });
+    return;
+  }
+
+  const modelInput = buildAgentModelInput(
+    goal,
+    pageContext,
+    actionableElements,
+    history,
+    metadata,
+    screenshot
+  );
   const baseSystemPrompt =
     "You are a browser automation planning assistant. Choose safe, incremental next actions for a content-script agent interacting with the current webpage.";
   const fullSystemPrompt = OPENAI_SYSTEM_PROMPT
     ? `${baseSystemPrompt}\n\n${OPENAI_SYSTEM_PROMPT}`
     : baseSystemPrompt;
+
+  const userContent = [{ type: "input_text", text: modelInput }];
+  if (screenshot) {
+    userContent.push({
+      type: "input_text",
+      text: "Attached viewport screenshot for the current step."
+    });
+    userContent.push({
+      type: "input_image",
+      image_url: screenshot.dataUrl
+    });
+  }
 
   const openAiBody = {
     model: OPENAI_MODEL,
@@ -671,7 +832,7 @@ app.post("/api/agent/step", async (req, res) => {
       },
       {
         role: "user",
-        content: [{ type: "input_text", text: modelInput }]
+        content: userContent
       }
     ],
     max_output_tokens: Math.max(280, Math.min(800, OPENAI_MAX_OUTPUT_TOKENS)),
@@ -719,8 +880,43 @@ app.post("/api/agent/step", async (req, res) => {
       return;
     }
 
+    const repeatedAction = detectRecentRepeatedAction(history, AGENT_REPEAT_ACTION_THRESHOLD);
+    const currentActionSignature = [
+      parsed.action.type,
+      parsed.action.elementId ? `el=${parsed.action.elementId}` : ""
+    ]
+      .filter(Boolean)
+      .join("|");
+    const repeatingLoop =
+      Boolean(repeatedAction) &&
+      Boolean(currentActionSignature) &&
+      repeatedAction.startsWith(currentActionSignature);
+
+    if (repeatingLoop) {
+      const nearLimit =
+        metadata.maxSteps && metadata.step ? metadata.step >= metadata.maxSteps - 1 : false;
+      if (nearLimit || metadata.stallCount >= AGENT_REPEAT_ACTION_THRESHOLD) {
+        res.json({
+          action: { type: "finish" },
+          reasoning: "Detected repeated loop and ending to provide final summary.",
+          message: "I stopped after repeated actions without clear new progress."
+        });
+        return;
+      }
+
+      res.json({
+        action: { type: "scroll", direction: "down", amount: 480 },
+        reasoning: "Detected repeated action; changing viewport to find new evidence.",
+        message: ""
+      });
+      return;
+    }
+
     const validElementIds = new Set(actionableElements.map((item) => item.id));
-    const needsElement = parsed.action.type === "click_element" || parsed.action.type === "type_in_element";
+    const needsElement =
+      parsed.action.type === "click_element" ||
+      parsed.action.type === "type_in_element" ||
+      (parsed.action.type === "press_enter" && Boolean(parsed.action.elementId));
     if (needsElement && !validElementIds.has(parsed.action.elementId)) {
       res.json({
         action: { type: "scroll", direction: "down", amount: 520 },
