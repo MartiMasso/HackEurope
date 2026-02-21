@@ -46,6 +46,8 @@ BACKEND_PORT=8787
 npm run start:backend
 ```
 
+Si actualizas código (por ejemplo Agent mode), reinicia backend y recarga la extensión en `chrome://extensions`.
+
 4. Comprueba salud (opcional):
 
 ```bash
@@ -67,7 +69,8 @@ curl http://127.0.0.1:8787/health
 4. Pulsa el nodo `BOTTOM` para abrir el chat.
 5. Escribe un prompt y pulsa Enter (o botón de envío).
 6. La respuesta aparece en el panel superior de la barra.
-7. En la barra del chat, pulsa el icono de la izquierda para desplegar 4 herramientas visuales (demo).
+7. En la barra del chat, pulsa el icono de la izquierda y activa `Agent`.
+8. Con `Agent` activo, el prompt se ejecuta como tarea de navegación (scroll/click/type) con cursor visual.
 
 Captura de pantalla parcial:
 - Pulsa el nodo `LEFT` del icono flotante.
@@ -91,10 +94,10 @@ En cada prompt, la extensión adjunta contexto de la página actual:
 2. `content.js` extrae contexto visible de la página.
 3. `content.js` envía prompt + contexto a `background.js`.
 4. `background.js` (opcional) hace `captureVisibleTab` cuando pides recorte parcial.
-5. `background.js` llama a `http://127.0.0.1:8787/api/chat` con prompt + contexto + adjuntos.
-6. `backend/server.js` llama a OpenAI con `OPENAI_API_KEY`.
-7. El backend devuelve `answer + chainOfThought`.
-8. La UI renderiza respuesta + pasos y ajusta la altura del panel dinámicamente.
+5. En modo normal, `background.js` llama a `http://127.0.0.1:8787/api/chat`.
+6. En `Agent` mode, `background.js` llama iterativamente a `http://127.0.0.1:8787/api/agent/step`.
+7. `backend/server.js` llama a OpenAI con `OPENAI_API_KEY`.
+8. La UI renderiza respuesta y, en Agent mode, muestra ejecución visual paso a paso.
 
 ## Supabase
 

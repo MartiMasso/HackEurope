@@ -22,6 +22,11 @@ const CHAIN_MAX_ITEMS = 4;
 const CHAIN_TITLE_MAX_CHARS = 140;
 const CHAIN_ITEM_MAX_CHARS = 280;
 const ANSWER_MAX_CHARS = 30000;
+const AGENT_ELEMENT_MAX_ITEMS = 28;
+const AGENT_ELEMENT_TEXT_MAX_CHARS = 120;
+const AGENT_HISTORY_MAX_ITEMS = 8;
+const AGENT_HISTORY_TEXT_MAX_CHARS = 220;
+const AGENT_GOAL_MAX_CHARS = 800;
 
 if (typeof fetch !== "function") {
   console.error("Node 18+ is required because global fetch is missing.");
@@ -190,6 +195,122 @@ function buildPromptWithContext(prompt, pageContext, attachments) {
   return parts.join("\n");
 }
 
+function normalizeActionableElements(rawElements) {
+  if (!Array.isArray(rawElements)) return [];
+
+  return rawElements
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+
+      const id = truncateText(item.id, 40);
+      const selector = truncateText(item.selector, 260);
+      if (!id || !selector) return null;
+
+      return {
+        id,
+        selector,
+        tag: truncateText(item.tag, 30),
+        text: truncateText(item.text, AGENT_ELEMENT_TEXT_MAX_CHARS),
+        placeholder: truncateText(item.placeholder, 90),
+        type: truncateText(item.type, 30),
+        role: truncateText(item.role, 30)
+      };
+    })
+    .filter(Boolean)
+    .slice(0, AGENT_ELEMENT_MAX_ITEMS);
+}
+
+function buildActionableElementsText(actionableElements) {
+  if (!Array.isArray(actionableElements) || actionableElements.length === 0) {
+    return "No actionable elements were detected in the viewport.";
+  }
+
+  return actionableElements
+    .map((item) => {
+      const parts = [`id=${item.id}`, `tag=${item.tag || "unknown"}`];
+      if (item.role) parts.push(`role=${item.role}`);
+      if (item.type) parts.push(`type=${item.type}`);
+      if (item.text) parts.push(`text=${item.text}`);
+      if (item.placeholder) parts.push(`placeholder=${item.placeholder}`);
+      return parts.join(" | ");
+    })
+    .join("\n");
+}
+
+function normalizeAgentHistory(rawHistory) {
+  if (!Array.isArray(rawHistory)) return [];
+
+  return rawHistory
+    .map((step) => {
+      if (!step || typeof step !== "object") return null;
+      const stepNumber = Number.isFinite(step.step) ? Math.max(1, Math.floor(step.step)) : null;
+      const action = truncateText(step.action, 60);
+      const result = truncateText(step.result, AGENT_HISTORY_TEXT_MAX_CHARS);
+      if (!stepNumber && !action && !result) return null;
+
+      return {
+        step: stepNumber,
+        action,
+        result
+      };
+    })
+    .filter(Boolean)
+    .slice(-AGENT_HISTORY_MAX_ITEMS);
+}
+
+function buildAgentHistoryText(history) {
+  if (!Array.isArray(history) || history.length === 0) {
+    return "No previous steps.";
+  }
+
+  return history
+    .map((step) => {
+      const stepLabel = step.step ? `Step ${step.step}` : "Step";
+      const actionLabel = step.action ? `action=${step.action}` : "action=unknown";
+      const resultLabel = step.result ? `result=${step.result}` : "result=none";
+      return `${stepLabel} | ${actionLabel} | ${resultLabel}`;
+    })
+    .join("\n");
+}
+
+function buildAgentModelInput(goal, pageContext, actionableElements, history) {
+  const safeGoal = truncateText(goal, AGENT_GOAL_MAX_CHARS);
+  const pageContextText = buildPageContextText(pageContext);
+  const elementsText = buildActionableElementsText(actionableElements);
+  const historyText = buildAgentHistoryText(history);
+
+  return [
+    "Return ONLY valid JSON with this shape:",
+    '{ "reasoning": "string", "action": { "type": "scroll|click_element|type_in_element|wait|finish", "...": "..." }, "message": "string optional" }',
+    "",
+    "Rules:",
+    "- You are choosing the NEXT best browser action to complete the user goal.",
+    "- The page can change between steps, so prefer robust incremental actions.",
+    "- Use only element IDs listed in [Actionable elements] for click/type actions.",
+    "- Choose finish when the goal is achieved or impossible with the current page context.",
+    "- Keep reasoning concise (1 sentence).",
+    "",
+    "Action parameter rules:",
+    '- scroll: { "type": "scroll", "direction": "up"|"down", "amount": number }',
+    '- click_element: { "type": "click_element", "elementId": "el_..." }',
+    '- type_in_element: { "type": "type_in_element", "elementId": "el_...", "text": "string", "submit": true|false, "clear": true|false }',
+    '- wait: { "type": "wait", "ms": number }',
+    '- finish: { "type": "finish" } and include "message" summarizing outcome.',
+    "",
+    "[User goal]",
+    safeGoal || "No goal provided.",
+    "",
+    "[Page context]",
+    pageContextText || "No page context.",
+    "",
+    "[Actionable elements]",
+    elementsText,
+    "",
+    "[Previous steps]",
+    historyText
+  ].join("\n");
+}
+
 function buildModelInput(promptWithContext) {
   return [
     "Return ONLY valid JSON with this shape:",
@@ -324,6 +445,62 @@ function parseStructuredResponse(rawText, pageContext, attachments = []) {
   };
 }
 
+function normalizeAgentAction(action) {
+  if (!action || typeof action !== "object") return null;
+  const type = toTrimmedString(action.type).toLowerCase();
+  if (!type) return null;
+
+  if (type === "finish") {
+    return { type: "finish" };
+  }
+
+  if (type === "scroll") {
+    const direction = action.direction === "up" ? "up" : "down";
+    const amount = Number.isFinite(action.amount) ? Math.max(120, Math.min(1400, Math.floor(action.amount))) : 520;
+    return { type: "scroll", direction, amount };
+  }
+
+  if (type === "click_element") {
+    const elementId = truncateText(action.elementId || action.element_id, 40);
+    if (!elementId) return null;
+    return { type: "click_element", elementId };
+  }
+
+  if (type === "type_in_element") {
+    const elementId = truncateText(action.elementId || action.element_id, 40);
+    const text = truncateText(action.text, 280);
+    if (!elementId) return null;
+    return {
+      type: "type_in_element",
+      elementId,
+      text,
+      submit: action.submit === true,
+      clear: action.clear !== false
+    };
+  }
+
+  if (type === "wait") {
+    const ms = Number.isFinite(action.ms) ? Math.max(120, Math.min(3000, Math.floor(action.ms))) : 700;
+    return { type: "wait", ms };
+  }
+
+  return null;
+}
+
+function parseAgentResponse(rawText) {
+  const parsed = extractJsonObject(rawText);
+  if (!parsed || typeof parsed !== "object") return null;
+
+  const action = normalizeAgentAction(parsed.action);
+  if (!action) return null;
+
+  return {
+    action,
+    reasoning: truncateText(parsed.reasoning, 260),
+    message: truncateText(parsed.message, 700)
+  };
+}
+
 const app = express();
 
 app.use(express.json({ limit: "12mb" }));
@@ -454,6 +631,115 @@ app.post("/api/chat", async (req, res) => {
       error instanceof Error && error.message
         ? error.message
         : "Unexpected backend error.";
+    res.status(500).json({ error: message });
+  }
+});
+
+app.post("/api/agent/step", async (req, res) => {
+  if (!OPENAI_API_KEY) {
+    res.status(500).json({
+      error: "Missing OPENAI_API_KEY in backend .env file."
+    });
+    return;
+  }
+
+  const goal = typeof req.body?.goal === "string" ? req.body.goal.trim() : "";
+  if (!goal) {
+    res.status(400).json({ error: "Field 'goal' is required." });
+    return;
+  }
+
+  const pageContext =
+    req.body?.pageContext && typeof req.body.pageContext === "object"
+      ? req.body.pageContext
+      : null;
+  const actionableElements = normalizeActionableElements(req.body?.actionableElements);
+  const history = normalizeAgentHistory(req.body?.history);
+  const modelInput = buildAgentModelInput(goal, pageContext, actionableElements, history);
+  const baseSystemPrompt =
+    "You are a browser automation planning assistant. Choose safe, incremental next actions for a content-script agent interacting with the current webpage.";
+  const fullSystemPrompt = OPENAI_SYSTEM_PROMPT
+    ? `${baseSystemPrompt}\n\n${OPENAI_SYSTEM_PROMPT}`
+    : baseSystemPrompt;
+
+  const openAiBody = {
+    model: OPENAI_MODEL,
+    input: [
+      {
+        role: "system",
+        content: [{ type: "input_text", text: fullSystemPrompt }]
+      },
+      {
+        role: "user",
+        content: [{ type: "input_text", text: modelInput }]
+      }
+    ],
+    max_output_tokens: Math.max(280, Math.min(800, OPENAI_MAX_OUTPUT_TOKENS)),
+    temperature: 0.15
+  };
+
+  try {
+    const response = await fetch(OPENAI_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify(openAiBody)
+    });
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      const upstreamError = payload?.error?.message;
+      res.status(response.status).json({
+        error: upstreamError || `OpenAI API failed with status ${response.status}.`
+      });
+      return;
+    }
+
+    const rawText = extractText(payload);
+    if (!rawText) {
+      res.status(502).json({
+        error: "OpenAI API returned an empty response for agent step."
+      });
+      return;
+    }
+
+    const parsed = parseAgentResponse(rawText);
+    if (!parsed) {
+      res.status(502).json({
+        error: "OpenAI API returned an invalid agent action response."
+      });
+      return;
+    }
+
+    const validElementIds = new Set(actionableElements.map((item) => item.id));
+    const needsElement = parsed.action.type === "click_element" || parsed.action.type === "type_in_element";
+    if (needsElement && !validElementIds.has(parsed.action.elementId)) {
+      res.json({
+        action: { type: "scroll", direction: "down", amount: 520 },
+        reasoning: parsed.reasoning || "Target element was not in the current viewport list; scrolling.",
+        message: ""
+      });
+      return;
+    }
+
+    res.json({
+      action: parsed.action,
+      reasoning: parsed.reasoning || "",
+      message: parsed.message || ""
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error && error.message
+        ? error.message
+        : "Unexpected backend error while planning agent step.";
     res.status(500).json({ error: message });
   }
 });

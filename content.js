@@ -12,6 +12,9 @@
   const BAR_ATTACHMENTS_ID = "__toolbox_bar_attachments__";
   const BAR_FEATURE_TOGGLE_ID = "__toolbox_bar_feature_toggle__";
   const BAR_FEATURE_TRAY_ID = "__toolbox_bar_feature_tray__";
+  const AGENT_OVERLAY_ID = "__toolbox_agent_overlay__";
+  const AGENT_CURSOR_ID = "__toolbox_agent_cursor__";
+  const AGENT_STATUS_ID = "__toolbox_agent_status__";
   const FLOATING_ICON_ID = "__toolbox_icon__";
   const FLOATING_NODE_ID_PREFIX = "__toolbox_node__";
   const FLOATING_POPUP_ID = "__toolbox_template_popup__";
@@ -19,6 +22,7 @@
   const SCREENSHOT_SELECTION_ID = "__toolbox_screen_capture_selection__";
   const TOGGLE_MESSAGE_TYPE = "TOGGLE_TOOLBOX_BUBBLE";
   const CHAT_MESSAGE_TYPE = "TOOLBOX_CHAT_REQUEST";
+  const AGENT_MESSAGE_TYPE = "TOOLBOX_AGENT_REQUEST";
   const CAPTURE_MESSAGE_TYPE = "TOOLBOX_CAPTURE_VISIBLE_TAB";
   const ICON_SRC = chrome.runtime.getURL("assets/icon.png");
 
@@ -38,8 +42,10 @@
   const FLOATING_QUICK_CLICK_MS = 300;
   const SCREENSHOT_MIN_SELECTION_PX = 14;
   const SCREENSHOT_MAX_SIDE_PX = 1400;
-  const FEATURE_TRAY_OPEN_WIDTH_PX = 172;
+  const FEATURE_TRAY_OPEN_WIDTH_PX = 86;
   const FEATURE_BUTTON_SIZE_PX = 28;
+  const AGENT_MAX_STEPS = 8;
+  const AGENT_MAX_HISTORY = 10;
   const PANEL_MAX_HEIGHT_PX = 900;
   const PANEL_MIN_HEIGHT_PX = 170;
   const PANEL_MAX_HEIGHT_RATIO = 0.78;
@@ -82,6 +88,9 @@
     floatingOnResize: null,
     imageAttachment: null,
     featureTrayOpen: false,
+    agentModeEnabled: false,
+    agentRunning: false,
+    agentStopRequested: false,
     screenCaptureCleanup: null,
     screenCaptureInProgress: false
   };
@@ -95,28 +104,10 @@
 
   const chatFeatureItems = [
     {
-      key: "summarize",
-      label: "Summarize",
+      key: "agent_mode",
+      label: "Agent",
       icon:
-        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dbeafe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h10"/></svg>'
-    },
-    {
-      key: "translate",
-      label: "Translate",
-      icon:
-        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dbeafe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14"/><path d="M12 4v3"/><path d="M9 20l3-7 3 7"/><path d="M17 10c0 3-2 6-5 8"/></svg>'
-    },
-    {
-      key: "code",
-      label: "Code",
-      icon:
-        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dbeafe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6"/><path d="M8 6l-6 6 6 6"/></svg>'
-    },
-    {
-      key: "vision",
-      label: "Vision",
-      icon:
-        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dbeafe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="3"/></svg>'
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dbeafe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10H7z"/><path d="M12 2v3"/><path d="M12 19v3"/><path d="M2 12h3"/><path d="M19 12h3"/><path d="M5 5l2 2"/><path d="M17 17l2 2"/><path d="M19 5l-2 2"/><path d="M7 17l-2 2"/></svg>'
     }
   ];
 
@@ -153,6 +144,15 @@
   }
   function getFeatureTray() {
     return getEl(BAR_FEATURE_TRAY_ID);
+  }
+  function getAgentOverlay() {
+    return getEl(AGENT_OVERLAY_ID);
+  }
+  function getAgentCursor() {
+    return getEl(AGENT_CURSOR_ID);
+  }
+  function getAgentStatus() {
+    return getEl(AGENT_STATUS_ID);
   }
   function getBottomGradient() {
     return getEl(BAR_GRADIENT_ID);
@@ -616,6 +616,523 @@
     toggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
   }
 
+  function sleep(ms) {
+    return new Promise((resolve) => {
+      setTimeout(resolve, Math.max(0, Math.floor(ms)));
+    });
+  }
+
+  function escapeCssValue(value) {
+    if (typeof value !== "string") return "";
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(value);
+    }
+    return value.replace(/["\\]/g, "\\$&");
+  }
+
+  function buildElementSelector(element) {
+    if (!(element instanceof Element)) return "";
+    const tag = element.tagName.toLowerCase();
+
+    if (element.id) {
+      return `#${escapeCssValue(element.id)}`;
+    }
+
+    const testId = element.getAttribute("data-testid");
+    if (testId && testId.length < 120) {
+      return `${tag}[data-testid="${escapeCssValue(testId)}"]`;
+    }
+
+    const ariaLabel = element.getAttribute("aria-label");
+    if (ariaLabel && ariaLabel.length < 120) {
+      return `${tag}[aria-label="${escapeCssValue(ariaLabel)}"]`;
+    }
+
+    const name = element.getAttribute("name");
+    if (name && name.length < 120) {
+      return `${tag}[name="${escapeCssValue(name)}"]`;
+    }
+
+    const parts = [];
+    let current = element;
+    for (let depth = 0; depth < 5; depth += 1) {
+      if (!current || !(current instanceof Element)) break;
+      const currentTag = current.tagName.toLowerCase();
+      let segment = currentTag;
+      if (current.id) {
+        segment += `#${escapeCssValue(current.id)}`;
+        parts.unshift(segment);
+        break;
+      }
+      const parent = current.parentElement;
+      if (parent) {
+        const sameTagSiblings = Array.from(parent.children).filter(
+          (child) => child.tagName === current.tagName
+        );
+        if (sameTagSiblings.length > 1) {
+          const index = sameTagSiblings.indexOf(current) + 1;
+          segment += `:nth-of-type(${index})`;
+        }
+      }
+      parts.unshift(segment);
+      current = parent;
+      if (!current || current === document.body) break;
+    }
+
+    return parts.join(" > ");
+  }
+
+  function collectActionableElements() {
+    const selector =
+      'a[href],button,input:not([type="hidden"]),textarea,select,[role="button"],[role="link"],[contenteditable="true"]';
+    const nodes = Array.from(document.querySelectorAll(selector));
+    const elements = [];
+    const seenSelectors = new Set();
+
+    for (const element of nodes) {
+      if (!(element instanceof HTMLElement)) continue;
+      if (!isElementVisibleInViewport(element)) continue;
+
+      const tag = element.tagName.toLowerCase();
+      const selectorText = buildElementSelector(element);
+      if (!selectorText || seenSelectors.has(selectorText)) continue;
+      seenSelectors.add(selectorText);
+
+      const rect = element.getBoundingClientRect();
+      const text = truncateText(
+        normalizeText(
+          element.getAttribute("aria-label") ||
+            element.getAttribute("title") ||
+            element.innerText ||
+            element.textContent ||
+            ""
+        ),
+        110
+      );
+      const placeholder = truncateText(
+        normalizeText(element.getAttribute("placeholder") || ""),
+        80
+      );
+      const type = truncateText(normalizeText(element.getAttribute("type") || ""), 40);
+      const role = truncateText(normalizeText(element.getAttribute("role") || ""), 40);
+
+      elements.push({
+        id: `el_${elements.length + 1}`,
+        tag,
+        selector: selectorText,
+        text,
+        placeholder,
+        type,
+        role,
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2)
+      });
+
+      if (elements.length >= 28) break;
+    }
+
+    return elements;
+  }
+
+  function requestAgentStep(goal, pageContext, actionableElements, history) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          type: AGENT_MESSAGE_TYPE,
+          goal,
+          pageContext,
+          actionableElements,
+          history
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(
+              new Error("No se pudo contactar con Agent Mode. Recarga la extensión e inténtalo.")
+            );
+            return;
+          }
+          if (!response || response.ok !== true || !response.action) {
+            const errorMessage =
+              response && typeof response.error === "string"
+                ? response.error
+                : "El backend de agente devolvió una respuesta inválida.";
+            reject(new Error(errorMessage));
+            return;
+          }
+          resolve(response);
+        }
+      );
+    });
+  }
+
+  function ensureAgentOverlay() {
+    let overlay = getAgentOverlay();
+    if (overlay) return overlay;
+
+    overlay = document.createElement("div");
+    overlay.id = AGENT_OVERLAY_ID;
+    Object.assign(overlay.style, {
+      position: "fixed",
+      inset: "0",
+      pointerEvents: "none",
+      zIndex: "2147483647"
+    });
+
+    const cursor = document.createElement("div");
+    cursor.id = AGENT_CURSOR_ID;
+    Object.assign(cursor.style, {
+      position: "fixed",
+      width: "16px",
+      height: "16px",
+      borderRadius: "9999px",
+      border: "2px solid rgba(56, 189, 248, 0.95)",
+      background: "rgba(14, 116, 144, 0.35)",
+      boxShadow: "0 0 0 10px rgba(56, 189, 248, 0.12)",
+      left: "0",
+      top: "0",
+      transform: "translate(-9999px, -9999px)",
+      transition: "transform 260ms ease"
+    });
+
+    const status = document.createElement("div");
+    status.id = AGENT_STATUS_ID;
+    Object.assign(status.style, {
+      position: "fixed",
+      top: "14px",
+      right: "14px",
+      padding: "8px 12px",
+      borderRadius: "10px",
+      background: "rgba(15, 23, 42, 0.92)",
+      border: "1px solid rgba(125, 211, 252, 0.45)",
+      color: "#e0f2fe",
+      fontFamily: "Arial, sans-serif",
+      fontSize: "12px",
+      letterSpacing: "0.2px",
+      maxWidth: "320px"
+    });
+    status.textContent = "Agent mode running...";
+
+    overlay.appendChild(cursor);
+    overlay.appendChild(status);
+    (document.body || document.documentElement).appendChild(overlay);
+    return overlay;
+  }
+
+  function removeAgentOverlay() {
+    const overlay = getAgentOverlay();
+    if (overlay) overlay.remove();
+  }
+
+  function setAgentStatus(text) {
+    ensureAgentOverlay();
+    const status = getAgentStatus();
+    if (status) {
+      status.textContent = text;
+    }
+  }
+
+  async function moveAgentCursor(x, y) {
+    ensureAgentOverlay();
+    const cursor = getAgentCursor();
+    if (!cursor) return;
+    const clampedX = clamp(Math.round(x), 8, Math.max(8, window.innerWidth - 8));
+    const clampedY = clamp(Math.round(y), 8, Math.max(8, window.innerHeight - 8));
+    cursor.style.transform = `translate(${clampedX - 8}px, ${clampedY - 8}px)`;
+    await sleep(280);
+  }
+
+  function flashElement(element) {
+    if (!(element instanceof HTMLElement)) return;
+    const previousOutline = element.style.outline;
+    const previousOutlineOffset = element.style.outlineOffset;
+    const previousTransition = element.style.transition;
+
+    element.style.outline = "2px solid rgba(56, 189, 248, 0.92)";
+    element.style.outlineOffset = "2px";
+    element.style.transition = "outline-color 180ms ease";
+    setTimeout(() => {
+      element.style.outline = previousOutline;
+      element.style.outlineOffset = previousOutlineOffset;
+      element.style.transition = previousTransition;
+    }, 700);
+  }
+
+  function resolveActionableElement(elementId, actionableElements) {
+    if (!elementId || !Array.isArray(actionableElements)) return null;
+    const entry = actionableElements.find((item) => item.id === elementId);
+    if (!entry || typeof entry.selector !== "string") return null;
+    try {
+      const element = document.querySelector(entry.selector);
+      return element instanceof HTMLElement ? { element, entry } : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async function typeTextLikeHuman(element, text, { clear = true } = {}) {
+    const value = typeof text === "string" ? text : "";
+    const normalized = value.slice(0, 280);
+
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      const prototype = Object.getPrototypeOf(element);
+      const valueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+      const setElementValue = (nextValue) => {
+        if (typeof valueSetter === "function") {
+          valueSetter.call(element, nextValue);
+        } else {
+          element.value = nextValue;
+        }
+      };
+
+      element.focus();
+      if (clear) {
+        setElementValue("");
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      for (const char of normalized) {
+        setElementValue(`${element.value}${char}`);
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        await sleep(24);
+      }
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+
+    if (element.isContentEditable) {
+      element.focus();
+      if (clear) {
+        element.textContent = "";
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      for (const char of normalized) {
+        element.textContent = `${element.textContent || ""}${char}`;
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        await sleep(24);
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  async function executeAgentAction(action, actionableElements) {
+    if (!action || typeof action.type !== "string") {
+      return { ok: false, summary: "Invalid agent action." };
+    }
+
+    const type = action.type;
+
+    if (type === "scroll") {
+      const direction = action.direction === "up" ? "up" : "down";
+      const amount = clamp(Number(action.amount) || 520, 120, 1400);
+      await moveAgentCursor(window.innerWidth - 28, Math.floor(window.innerHeight * 0.45));
+      window.scrollBy({
+        top: direction === "up" ? -amount : amount,
+        behavior: "smooth"
+      });
+      await sleep(700);
+      return { ok: true, summary: `Scrolled ${direction}.` };
+    }
+
+    if (type === "click_element") {
+      const resolved = resolveActionableElement(action.elementId, actionableElements);
+      if (!resolved) {
+        return { ok: false, summary: "Target element not found for click." };
+      }
+      const { element } = resolved;
+      element.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+      await sleep(320);
+      const rect = element.getBoundingClientRect();
+      await moveAgentCursor(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      flashElement(element);
+      element.click();
+      await sleep(520);
+      return { ok: true, summary: "Clicked target element." };
+    }
+
+    if (type === "type_in_element") {
+      const resolved = resolveActionableElement(action.elementId, actionableElements);
+      if (!resolved) {
+        return { ok: false, summary: "Target element not found for typing." };
+      }
+      const { element } = resolved;
+      element.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+      await sleep(300);
+      const rect = element.getBoundingClientRect();
+      await moveAgentCursor(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      flashElement(element);
+      const typed = await typeTextLikeHuman(element, action.text || "", {
+        clear: action.clear !== false
+      });
+      if (!typed) {
+        return { ok: false, summary: "Could not type in the target element." };
+      }
+      if (action.submit === true) {
+        element.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true })
+        );
+        element.dispatchEvent(
+          new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true })
+        );
+      }
+      await sleep(300);
+      return { ok: true, summary: "Typed into target element." };
+    }
+
+    if (type === "wait") {
+      const ms = clamp(Number(action.ms) || 700, 120, 3000);
+      await sleep(ms);
+      return { ok: true, summary: `Waited ${ms}ms.` };
+    }
+
+    if (type === "finish") {
+      return { ok: true, summary: "Agent marked task as finished.", done: true };
+    }
+
+    return { ok: false, summary: `Unsupported action: ${type}` };
+  }
+
+  function trimAgentLogs(logs, entry) {
+    logs.push(entry);
+    if (logs.length > AGENT_MAX_HISTORY) {
+      logs.splice(0, logs.length - AGENT_MAX_HISTORY);
+    }
+  }
+
+  function buildAgentChainFromHistory(history) {
+    if (!Array.isArray(history) || history.length === 0) return [];
+    return history.slice(-4).map((item, index) => ({
+      title: `Agent update ${index + 1}`,
+      items: [item]
+    }));
+  }
+
+  function setAgentModeEnabled(enabled) {
+    state.agentModeEnabled = Boolean(enabled);
+
+    const buttons = document.querySelectorAll('[data-toolbox-feature="agent_mode"]');
+    buttons.forEach((button) => {
+      if (!(button instanceof HTMLElement)) return;
+      button.style.background = state.agentModeEnabled
+        ? "rgba(14, 116, 144, 0.35)"
+        : "rgba(30, 64, 175, 0.25)";
+      button.style.borderColor = state.agentModeEnabled
+        ? "rgba(125, 211, 252, 0.6)"
+        : "rgba(191, 219, 254, 0.25)";
+    });
+
+    const input = getInput();
+    if (input) {
+      input.placeholder = state.agentModeEnabled
+        ? "Agent mode: describe the task step-by-step..."
+        : "Ask anything…";
+    }
+  }
+
+  async function runAgentTask(goal) {
+    const input = getInput();
+    if (!input || state.pending || state.agentRunning) return;
+
+    const requestId = ++state.requestId;
+    state.pending = true;
+    state.agentRunning = true;
+    state.agentStopRequested = false;
+    input.disabled = true;
+
+    if (!state.expanded) expandPanel();
+
+    const logs = [];
+    const history = [];
+    setPanelContent("Agent mode started. Planning actions on this webpage...", {
+      muted: true,
+      chainOfThought: []
+    });
+    setAgentStatus("Agent: planning first step...");
+
+    try {
+      for (let step = 1; step <= AGENT_MAX_STEPS; step += 1) {
+        if (state.agentStopRequested || requestId !== state.requestId) {
+          throw new Error("Agent execution stopped.");
+        }
+
+        const pageContext = buildPageContext();
+        const actionableElements = collectActionableElements();
+        const historyPayload = history.slice(-6).map((item) => ({
+          step: item.step,
+          action: item.action,
+          result: item.result
+        }));
+
+        const agentResponse = await requestAgentStep(
+          goal,
+          pageContext,
+          actionableElements,
+          historyPayload
+        );
+
+        const reasoning =
+          typeof agentResponse.reasoning === "string" ? agentResponse.reasoning.trim() : "";
+        if (reasoning) {
+          trimAgentLogs(logs, `Step ${step} plan: ${reasoning}`);
+        }
+
+        const action = agentResponse.action;
+        const actionType = typeof action?.type === "string" ? action.type : "unknown";
+        setAgentStatus(`Agent step ${step}/${AGENT_MAX_STEPS}: ${actionType}`);
+
+        if (actionType === "finish") {
+          const finishMessage =
+            typeof agentResponse.message === "string" && agentResponse.message.trim()
+              ? agentResponse.message.trim()
+              : "Task completed.";
+          trimAgentLogs(logs, `Done: ${finishMessage}`);
+          setPanelContent(finishMessage, {
+            chainOfThought: buildAgentChainFromHistory(logs)
+          });
+          return;
+        }
+
+        const execution = await executeAgentAction(action, actionableElements);
+        history.push({
+          step,
+          action: actionType,
+          result: execution.summary
+        });
+        trimAgentLogs(
+          logs,
+          execution.ok
+            ? `Step ${step} executed: ${execution.summary}`
+            : `Step ${step} warning: ${execution.summary}`
+        );
+
+        setPanelContent(logs.join("\n"), {
+          muted: true,
+          chainOfThought: buildAgentChainFromHistory(logs)
+        });
+      }
+
+      setPanelContent("Agent reached max steps without explicit finish.", {
+        error: true,
+        chainOfThought: buildAgentChainFromHistory(logs)
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Agent mode failed unexpectedly.";
+      setPanelContent(`Error: ${message}`, { error: true, chainOfThought: [] });
+    } finally {
+      removeAgentOverlay();
+      state.agentRunning = false;
+      state.pending = false;
+      if (requestId === state.requestId) {
+        input.disabled = false;
+        input.focus();
+        input.select();
+      }
+    }
+  }
+
   function requestVisibleTabCapture() {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ type: CAPTURE_MESSAGE_TYPE }, (response) => {
@@ -700,7 +1217,13 @@
   }
 
   async function withTemporarilyHiddenToolboxUi(run) {
-    const uiElements = [getFloatingIcon(), getBar(), getBottomGradient(), getFloatingPopup()];
+    const uiElements = [
+      getFloatingIcon(),
+      getBar(),
+      getBottomGradient(),
+      getFloatingPopup(),
+      getAgentOverlay()
+    ];
     floatingDirections.forEach(({ key }) => {
       const node = state.floatingNodeMap.get(key) || getFloatingNode(key);
       if (node) uiElements.push(node);
@@ -1197,6 +1720,11 @@
     const prompt = input.value.trim();
     if (!prompt) return;
 
+    if (state.agentModeEnabled) {
+      await runAgentTask(prompt);
+      return;
+    }
+
     const requestId = ++state.requestId;
     state.pending = true;
     input.disabled = true;
@@ -1360,6 +1888,7 @@
       const button = document.createElement("button");
       button.type = "button";
       button.title = item.label;
+      button.dataset.toolboxFeature = item.key;
       button.setAttribute("aria-label", item.label);
       button.innerHTML = item.icon;
       Object.assign(button.style, {
@@ -1380,6 +1909,13 @@
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
+        if (item.key === "agent_mode") {
+          if (state.pending || state.agentRunning) return;
+          setAgentModeEnabled(!state.agentModeEnabled);
+          if (state.featureTrayOpen) {
+            setFeatureTrayOpen(false);
+          }
+        }
       });
       button.addEventListener("pointerenter", () => {
         button.style.background = "rgba(59, 130, 246, 0.34)";
@@ -1415,7 +1951,9 @@
     const input = document.createElement("input");
     input.id = BAR_INPUT_ID;
     input.type = "text";
-    input.placeholder = "Ask anything…";
+    input.placeholder = state.agentModeEnabled
+      ? "Agent mode: describe the task step-by-step..."
+      : "Ask anything…";
     input.autocomplete = "off";
     input.spellcheck = false;
 
@@ -1611,6 +2149,7 @@
     /* ── mount ── */
     (document.body || document.documentElement).appendChild(bar);
     setFeatureTrayOpen(false);
+    setAgentModeEnabled(state.agentModeEnabled);
     renderAttachmentStrip();
 
     /* slide in */
@@ -1633,7 +2172,10 @@
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        if (state.featureTrayOpen) {
+        if (state.agentRunning) {
+          state.agentStopRequested = true;
+          setAgentStatus("Agent: stopping...");
+        } else if (state.featureTrayOpen) {
           setFeatureTrayOpen(false);
         } else if (state.expanded) {
           collapsePanel();
@@ -1693,6 +2235,8 @@
 
     state.requestId += 1;
     state.pending = false;
+    state.agentStopRequested = true;
+    removeAgentOverlay();
     const input = getInput();
     if (input) input.disabled = false;
 
@@ -1743,6 +2287,8 @@
     state.visible = false;
     state.expanded = false;
     state.pending = false;
+    state.agentRunning = false;
+    state.agentStopRequested = false;
   }
 
   /* ================================================================
@@ -1754,6 +2300,9 @@
 
   function deactivateToolbox() {
     finishScreenCaptureOverlay();
+    state.agentStopRequested = true;
+    removeAgentOverlay();
+    setAgentModeEnabled(false);
     if (state.visible) {
       dismissBar({ removeFloating: true });
       return;
