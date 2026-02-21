@@ -6,8 +6,10 @@
   const BAR_INPUT_ID = "__toolbox_bar_input__";
   const BAR_GRADIENT_ID = "__toolbox_bottom_gradient__";
   const PANEL_ID = "__toolbox_panel__";
+  const PANEL_CONTENT_ID = "__toolbox_panel_content__";
   const TEMPLATE_POPUP_ID = "__toolbox_template_popup__";
   const TOGGLE_MESSAGE_TYPE = "TOGGLE_TOOLBOX_BUBBLE";
+  const CHAT_MESSAGE_TYPE = "TOOLBOX_CHAT_REQUEST";
   const ICON_SRC = chrome.runtime.getURL("assets/icon.png");
 
   /* ================================================================
@@ -41,6 +43,8 @@
   const state = {
     visible: false,
     expanded: false,   // results panel open
+    pending: false,
+    requestId: 0,
     barBottom: BAR_BOTTOM_PX,
     barLeft: 0,        // will be centred on create
     onResize: null,
@@ -59,6 +63,9 @@
   }
   function getPanel() {
     return getEl(PANEL_ID);
+  }
+  function getPanelContent() {
+    return getEl(PANEL_CONTENT_ID);
   }
   function getBottomGradient() {
     return getEl(BAR_GRADIENT_ID);
@@ -111,6 +118,71 @@
   function removePlaceholderStyle() {
     const s = getEl(PLACEHOLDER_ID);
     if (s) s.remove();
+  }
+
+  function setPanelContent(text, { muted = false, error = false } = {}) {
+    const panelContent = getPanelContent();
+    if (!panelContent) return;
+
+    panelContent.textContent = text;
+    panelContent.style.opacity = muted ? "0.6" : "1";
+    panelContent.style.color = error ? "#fca5a5" : INPUT_COLOR;
+  }
+
+  function requestChatAnswer(prompt) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: CHAT_MESSAGE_TYPE, prompt }, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error("No se pudo contactar con la extensión. Recárgala e inténtalo de nuevo."));
+          return;
+        }
+
+        if (!response || response.ok !== true || typeof response.text !== "string") {
+          const errorMessage =
+            response && typeof response.error === "string"
+              ? response.error
+              : "El backend devolvió una respuesta inválida.";
+          reject(new Error(errorMessage));
+          return;
+        }
+
+        resolve(response.text);
+      });
+    });
+  }
+
+  async function submitPrompt() {
+    const input = getInput();
+    if (!input || state.pending) return;
+
+    const prompt = input.value.trim();
+    if (!prompt) return;
+
+    const requestId = ++state.requestId;
+    state.pending = true;
+    input.disabled = true;
+
+    if (!state.expanded) expandPanel();
+    setPanelContent("Pensando...", { muted: true });
+
+    try {
+      const answer = await requestChatAnswer(prompt);
+      if (requestId !== state.requestId) return;
+      setPanelContent(answer);
+    } catch (error) {
+      if (requestId !== state.requestId) return;
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "No se pudo obtener respuesta.";
+      setPanelContent(`Error: ${message}`, { error: true });
+    } finally {
+      if (requestId !== state.requestId) return;
+      state.pending = false;
+      input.disabled = false;
+      input.focus();
+      input.select();
+    }
   }
 
   /* ================================================================
@@ -197,9 +269,7 @@
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        if (!state.expanded) {
-          expandPanel();
-        }
+        submitPrompt();
       }
     });
 
@@ -221,7 +291,7 @@
     sendHint.addEventListener("pointerdown", (e) => e.stopPropagation());
     sendHint.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (!state.expanded) expandPanel();
+      submitPrompt();
     });
     sendHint.addEventListener("pointerenter", () => {
       sendHint.style.background = "rgba(99, 102, 241, 0.45)";
@@ -244,7 +314,8 @@
       left: "0",
       width: "100%",
       maxHeight: "0",
-      overflow: "hidden",
+      overflowX: "hidden",
+      overflowY: "auto",
       borderRadius: `${PANEL_RADIUS_PX}px`,
       background: BG_COLOR,
       backdropFilter: BG_BLUR,
@@ -263,12 +334,15 @@
 
     /* placeholder content inside panel */
     const panelInner = document.createElement("div");
+    panelInner.id = PANEL_CONTENT_ID;
     Object.assign(panelInner.style, {
       padding: "20px 0",
       opacity: "0.5",
-      textAlign: "center"
+      textAlign: "left",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word"
     });
-    panelInner.textContent = "Results will appear here…";
+    panelInner.textContent = "Escribe una pregunta y pulsa Enter para hablar con la IA.";
     panel.appendChild(panelInner);
 
     bar.appendChild(panel);
@@ -413,6 +487,11 @@
     const gradient = getBottomGradient();
     if (!bar) return;
 
+    state.requestId += 1;
+    state.pending = false;
+    const input = getInput();
+    if (input) input.disabled = false;
+
     /* first collapse panel if open */
     if (state.expanded) collapsePanel();
 
@@ -453,6 +532,7 @@
 
     state.visible = false;
     state.expanded = false;
+    state.pending = false;
   }
 
   /* ================================================================

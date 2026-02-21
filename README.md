@@ -1,6 +1,7 @@
-# Toolbox Floating Icon (Chrome Extension MV3)
+# Toolbox Search Bar + OpenAI Backend
 
-MVP de una extensión de Google Chrome (Manifest V3) que, al hacer click en el icono, hace toggle de una burbuja con imagen flotante arrastrable en la pestaña activa.
+Extensión de Chrome (Manifest V3) con barra de IA flotante que envía prompts a un backend local.  
+La `OPENAI_API_KEY` vive solo en el backend (`.env`), no en el frontend de la extensión.
 
 ## Estructura
 
@@ -9,50 +10,72 @@ MVP de una extensión de Google Chrome (Manifest V3) que, al hacer click en el i
 ├── assets/
 │   ├── icon.png
 │   └── logo1.png
+├── backend/
+│   └── server.js
 ├── background.js
 ├── content.js
 ├── manifest.json
+├── package.json
+├── .env
+├── .env.example
 └── README.md
 ```
 
-## Cargar la extensión (Load unpacked)
+## 1) Configurar backend local
+
+Requisito: Node.js 18+.
+
+1. Instala dependencias:
+
+```bash
+npm install
+```
+
+2. Edita `.env` y pon tu clave real:
+
+```env
+OPENAI_API_KEY=tu_clave_real_de_openai
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_MAX_OUTPUT_TOKENS=700
+BACKEND_PORT=8787
+```
+
+3. Arranca el backend:
+
+```bash
+npm run start:backend
+```
+
+4. Comprueba salud (opcional):
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+## 2) Cargar la extensión
 
 1. Abre `chrome://extensions/`.
-2. Activa **Developer mode** (arriba a la derecha).
-3. Haz click en **Load unpacked**.
-4. Selecciona la carpeta raíz de este proyecto.
+2. Activa **Developer mode**.
+3. Pulsa **Load unpacked** y selecciona esta carpeta.
+4. Si ya estaba cargada, pulsa **Reload** en la extensión.
 
-## Recargar la extensión
+## 3) Uso
 
-1. Ve a `chrome://extensions/`.
-2. En la tarjeta de **Toolbox Floating Icon**, pulsa el botón **Reload**.
-3. Refresca cualquier pestaña donde quieras probarla.
+1. Abre una web normal (`http`/`https`).
+2. Haz click en el icono de la extensión o usa `Ctrl+Shift+Space`.
+3. Escribe un prompt y pulsa Enter (o botón de envío).
+4. La respuesta aparece en el panel superior de la barra.
 
-## Uso
+## Flujo técnico
 
-1. Abre cualquier página web permitida por Chrome (`http`, `https`, etc.).
-2. Haz click en el icono de la extensión.
-3. Se crea o elimina la burbuja flotante con id `__toolbox_icon__` usando `assets/icon.png`.
-4. Puedes arrastrarla con el ratón para moverla por toda la pantalla.
-5. Si haces click rápido en la burbuja, se expande como neurona con 4 círculos (`TOP`, `LEFT`, `RIGHT`, `BOTTOM`).
-6. Cada círculo es clicable y muestra un popup temporal con un mensaje y una imagen de plantilla.
+1. `content.js` captura el prompt.
+2. `content.js` envía mensaje a `background.js`.
+3. `background.js` llama a `http://127.0.0.1:8787/api/chat`.
+4. `backend/server.js` llama a OpenAI con `OPENAI_API_KEY`.
+5. El texto vuelve a la UI.
 
-Nota: en páginas restringidas (`chrome://`, Chrome Web Store, etc.) Chrome bloquea content scripts; ahí no se puede inyectar la burbuja por limitación del navegador.
+## Debug rápido
 
-## Depurar Service Worker (background.js)
-
-1. Ve a `chrome://extensions/`.
-2. En la extensión, entra en **Service worker** y pulsa **Inspect**.
-3. Usa la consola de DevTools para ver logs de `background.js`.
-
-## Depurar Content Script (content.js)
-
-1. Abre una página donde la extensión esté permitida.
-2. Abre DevTools de esa pestaña (`Right click` -> **Inspect**).
-3. En **Sources**, busca la sección de content scripts de la extensión y abre `content.js`.
-4. Revisa logs/errores en **Console**.
-
-## Icono
-
-La UI flotante en la página usa `assets/icon.png`.
-El icono de la acción de la extensión en la toolbar usa `assets/logo1.png` (declarado en `manifest.json`).
+1. Service worker: `chrome://extensions/` -> **Service worker** -> **Inspect**.
+2. Content script: DevTools de la página -> pestaña **Console/Sources**.
+3. Backend: logs del terminal donde corriste `npm run start:backend`.
