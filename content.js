@@ -4,6 +4,7 @@
    * ================================================================ */
   const BAR_CONTAINER_ID = "__toolbox_bar_container__";
   const BAR_INPUT_ID = "__toolbox_bar_input__";
+  const BAR_GRADIENT_ID = "__toolbox_bottom_gradient__";
   const PANEL_ID = "__toolbox_panel__";
   const TEMPLATE_POPUP_ID = "__toolbox_template_popup__";
   const TOGGLE_MESSAGE_TYPE = "TOGGLE_TOOLBOX_BUBBLE";
@@ -16,6 +17,7 @@
   const BAR_HEIGHT_PX = 54;
   const BAR_RADIUS_PX = 27;
   const BAR_BOTTOM_PX = 18;
+  const BAR_GRADIENT_HEIGHT_PX = 220;
   const PANEL_MAX_HEIGHT_PX = 400;
   const PANEL_RADIUS_PX = 18;
   const DRAG_THRESHOLD_PX = 5;
@@ -58,6 +60,34 @@
   function getPanel() {
     return getEl(PANEL_ID);
   }
+  function getBottomGradient() {
+    return getEl(BAR_GRADIENT_ID);
+  }
+
+  function ensureBottomGradient() {
+    let gradient = getBottomGradient();
+    if (gradient) return gradient;
+
+    gradient = document.createElement("div");
+    gradient.id = BAR_GRADIENT_ID;
+
+    Object.assign(gradient.style, {
+      position: "fixed",
+      left: "0",
+      bottom: "0",
+      width: "100vw",
+      height: `${BAR_GRADIENT_HEIGHT_PX}px`,
+      background:
+        "linear-gradient(to top, rgba(37, 99, 235, 0.22) 0%, rgba(17, 24, 39, 0.18) 34%, rgba(17, 24, 39, 0.10) 58%, rgba(17, 24, 39, 0.04) 78%, rgba(17, 24, 39, 0) 100%)",
+      pointerEvents: "none",
+      zIndex: "2147483646",
+      opacity: "0",
+      transition: `opacity ${SLIDE_DURATION_MS}ms ease`
+    });
+
+    (document.body || document.documentElement).appendChild(gradient);
+    return gradient;
+  }
 
   /* ================================================================
    *  PLACEHOLDER STYLE  (can't style ::placeholder inline)
@@ -88,6 +118,7 @@
    * ================================================================ */
   function createBar() {
     injectPlaceholderStyle();
+    const gradient = ensureBottomGradient();
 
     /* ── container (pill bar) ── */
     const bar = document.createElement("div");
@@ -310,6 +341,7 @@
     /* slide in */
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        gradient.style.opacity = "1";
         bar.style.bottom = `${BAR_BOTTOM_PX}px`;
         bar.style.opacity = "1";
       });
@@ -378,6 +410,7 @@
    * ================================================================ */
   function dismissBar() {
     const bar = getBar();
+    const gradient = getBottomGradient();
     if (!bar) return;
 
     /* first collapse panel if open */
@@ -387,6 +420,7 @@
     bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
 
     requestAnimationFrame(() => {
+      if (gradient) gradient.style.opacity = "0";
       bar.style.bottom = `-${BAR_HEIGHT_PX + 20}px`;
       bar.style.opacity = "0";
     });
@@ -402,6 +436,8 @@
   function removeBarUI() {
     const bar = getBar();
     if (bar) bar.remove();
+    const gradient = getBottomGradient();
+    if (gradient) gradient.remove();
 
     removePlaceholderStyle();
 
