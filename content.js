@@ -5,12 +5,14 @@
   const BAR_CONTAINER_ID = "__toolbox_bar_container__";
   const BAR_INPUT_ID = "__toolbox_bar_input__";
   const BAR_INPUT_ROW_ID = "__toolbox_bar_input_row__";
+  const BAR_MIC_BUTTON_ID = "__toolbox_bar_mic_button__";
   const BAR_GRADIENT_ID = "__toolbox_bottom_gradient__";
   const PANEL_ID = "__toolbox_panel__";
   const PANEL_CONTENT_ID = "__toolbox_panel_content__";
   const PANEL_PROMPT_ID = "__toolbox_panel_prompt__";
   const PANEL_ANSWER_ID = "__toolbox_panel_answer__";
   const PANEL_COT_ID = "__toolbox_panel_chain_of_thought__";
+  const PANEL_TTS_BUTTON_ID = "__toolbox_panel_tts_button__";
   const PANEL_AGENT_BUTTON_ID = "__toolbox_panel_agent_button__";
   const PANEL_PIN_BUTTON_ID = "__toolbox_panel_pin_button__";
   const PANEL_CLOSE_BUTTON_ID = "__toolbox_panel_close_button__";
@@ -28,6 +30,7 @@
   const TOGGLE_MESSAGE_TYPE = "TOGGLE_TOOLBOX_BUBBLE";
   const CHAT_MESSAGE_TYPE = "TOOLBOX_CHAT_REQUEST";
   const AGENT_MESSAGE_TYPE = "TOOLBOX_AGENT_REQUEST";
+  const TTS_MESSAGE_TYPE = "TOOLBOX_TTS_REQUEST";
   const CAPTURE_MESSAGE_TYPE = "TOOLBOX_CAPTURE_VISIBLE_TAB";
   const ICON_SRC = chrome.runtime.getURL("assets/icon.png");
   const PIN_ICON_SRC = chrome.runtime.getURL("assets/pin.png");
@@ -63,6 +66,7 @@
   const PAGE_CONTEXT_MAX_CHARS = 12000;
   const PAGE_SELECTION_MAX_CHARS = 2000;
   const PAGE_ACTIVE_ELEMENT_MAX_CHARS = 2000;
+  const SPEECH_AUTO_SUBMIT_SILENCE_MS = 1200;
 
   /* ── animation ── */
   const SLIDE_DURATION_MS = 380;
@@ -110,6 +114,17 @@
     agentModeEnabled: false,
     agentRunning: false,
     agentStopRequested: false,
+    speechRecognition: null,
+    speechSupported: Boolean(window.SpeechRecognition || window.webkitSpeechRecognition),
+    speechRecording: false,
+    speechStopRequested: false,
+    speechBaseText: "",
+    speechFinalText: "",
+    speechAutoSubmitTimer: null,
+    speechAutoSubmitPending: false,
+    ttsPending: false,
+    ttsPlaying: false,
+    ttsAudio: null,
     screenCaptureCleanup: null,
     screenCaptureInProgress: false
   };
@@ -172,6 +187,9 @@
   function getInputRow() {
     return getEl(BAR_INPUT_ROW_ID);
   }
+  function getMicButton() {
+    return getEl(BAR_MIC_BUTTON_ID);
+  }
   function getPanel() {
     return getEl(PANEL_ID);
   }
@@ -186,6 +204,9 @@
   }
   function getPanelChainOfThought() {
     return getEl(PANEL_COT_ID);
+  }
+  function getPanelTtsButton() {
+    return getEl(PANEL_TTS_BUTTON_ID);
   }
   function getPanelAgentButton() {
     return getEl(PANEL_AGENT_BUTTON_ID);
@@ -1062,6 +1083,360 @@
     }));
   }
 
+  function stopTtsPlayback() {
+    if (state.ttsAudio) {
+      try {
+        state.ttsAudio.pause();
+      } catch (error) {
+        // Ignore pause errors on detached audio instances.
+      }
+      state.ttsAudio = null;
+    }
+    state.ttsPlaying = false;
+  }
+
+  function updateTtsButtonVisualState() {
+    const button = getPanelTtsButton();
+    if (!button) return;
+
+    if (!state.currentTabHasResponse && !state.ttsPlaying && !state.ttsPending) {
+      button.title = "No response to read yet";
+      button.style.opacity = "0.55";
+      button.style.cursor = "not-allowed";
+      button.textContent = "S";
+      return;
+    }
+
+    if (state.ttsPending) {
+      button.title = "Generating speech...";
+      button.style.opacity = "0.65";
+      button.style.cursor = "wait";
+      button.textContent = "...";
+      return;
+    }
+
+    if (state.ttsPlaying) {
+      button.title = "Stop speech";
+      button.style.opacity = "1";
+      button.style.cursor = "pointer";
+      button.textContent = "[]";
+      return;
+    }
+
+    button.title = "Read response aloud";
+    button.style.opacity = "0.95";
+    button.style.cursor = "pointer";
+    button.textContent = "S";
+  }
+
+  function requestSpeechAudio(text) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        { type: TTS_MESSAGE_TYPE, text },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(
+              new Error("No se pudo contactar con TTS. Recarga la extensión e inténtalo.")
+            );
+            return;
+          }
+
+          if (!response || response.ok !== true || typeof response.audioBase64 !== "string") {
+            const errorMessage =
+              response && typeof response.error === "string"
+                ? response.error
+                : "El backend TTS devolvió una respuesta inválida.";
+            reject(new Error(errorMessage));
+            return;
+          }
+
+          resolve({
+            audioBase64: response.audioBase64,
+            mimeType:
+              typeof response.mimeType === "string" && response.mimeType
+                ? response.mimeType
+                : "audio/mpeg"
+          });
+        }
+      );
+    });
+  }
+
+  async function speakPanelAnswer() {
+    if (state.ttsPending) return;
+    if (state.ttsPlaying) {
+      stopTtsPlayback();
+      updateTtsButtonVisualState();
+      return;
+    }
+    if (!state.currentTabHasResponse) return;
+
+    const originBar = getBar();
+    const answer = getPanelAnswer();
+    const answerText = typeof answer?.textContent === "string" ? answer.textContent.trim() : "";
+    if (!answerText) return;
+
+    state.ttsPending = true;
+    updateTtsButtonVisualState();
+
+    try {
+      const result = await requestSpeechAudio(answerText);
+      if (!originBar || originBar !== getBar()) {
+        return;
+      }
+      const audio = new Audio(`data:${result.mimeType};base64,${result.audioBase64}`);
+      stopTtsPlayback();
+      state.ttsAudio = audio;
+      state.ttsPlaying = true;
+      updateTtsButtonVisualState();
+
+      const resetAudioState = () => {
+        if (state.ttsAudio === audio) {
+          state.ttsAudio = null;
+          state.ttsPlaying = false;
+          updateTtsButtonVisualState();
+        }
+      };
+      audio.addEventListener("ended", resetAudioState, { once: true });
+      audio.addEventListener("error", resetAudioState, { once: true });
+      await audio.play();
+    } catch (error) {
+      stopTtsPlayback();
+      const button = getPanelTtsButton();
+      if (button) {
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : "No se pudo generar audio.";
+        button.title = message;
+      }
+    } finally {
+      state.ttsPending = false;
+      updateTtsButtonVisualState();
+    }
+  }
+
+  function clearSpeechAutoSubmitTimer() {
+    if (state.speechAutoSubmitTimer) {
+      clearTimeout(state.speechAutoSubmitTimer);
+      state.speechAutoSubmitTimer = null;
+    }
+  }
+
+  function submitPromptFromSpeechIfReady() {
+    const input = getInput();
+    if (!input || state.pending || state.agentRunning) return;
+    if (!input.value.trim()) return;
+    submitPrompt();
+  }
+
+  function scheduleSpeechAutoSubmit() {
+    clearSpeechAutoSubmitTimer();
+
+    if (!state.speechRecording || state.pending || state.agentRunning || state.speechStopRequested) {
+      return;
+    }
+
+    const input = getInput();
+    if (!input || !input.value.trim()) return;
+
+    state.speechAutoSubmitTimer = setTimeout(() => {
+      state.speechAutoSubmitTimer = null;
+      const activeInput = getInput();
+      if (
+        !activeInput ||
+        !activeInput.value.trim() ||
+        state.pending ||
+        state.agentRunning ||
+        !state.speechRecording ||
+        state.speechStopRequested
+      ) {
+        return;
+      }
+
+      stopSpeechRecognition({ preserveText: true, autoSubmit: true });
+    }, SPEECH_AUTO_SUBMIT_SILENCE_MS);
+  }
+
+  function stopSpeechRecognition({ preserveText = true, autoSubmit = false } = {}) {
+    clearSpeechAutoSubmitTimer();
+    state.speechStopRequested = true;
+    state.speechAutoSubmitPending = autoSubmit;
+
+    if (!preserveText) {
+      state.speechBaseText = "";
+      state.speechFinalText = "";
+    }
+
+    const wasRecording = state.speechRecording;
+    const recognition = state.speechRecognition;
+    if (recognition && wasRecording) {
+      try {
+        recognition.stop();
+      } catch (error) {
+        // Ignore stop errors from stale recognition instances.
+      }
+    }
+
+    state.speechRecording = false;
+    updateMicButtonVisualState();
+
+    if (!wasRecording && autoSubmit) {
+      state.speechAutoSubmitPending = false;
+      submitPromptFromSpeechIfReady();
+    }
+  }
+
+  function updateMicButtonVisualState() {
+    const button = getMicButton();
+    if (!button) return;
+
+    if (!state.speechSupported) {
+      button.title = "Speech-to-text is not supported in this browser.";
+      button.style.opacity = "0.45";
+      button.style.cursor = "not-allowed";
+      button.style.background = "rgba(71, 85, 105, 0.42)";
+      button.style.borderColor = "rgba(148, 163, 184, 0.35)";
+      button.textContent = "M";
+      return;
+    }
+
+    if (state.speechRecording) {
+      button.title = "Stop voice input";
+      button.style.opacity = "1";
+      button.style.cursor = "pointer";
+      button.style.background = "rgba(239, 68, 68, 0.58)";
+      button.style.borderColor = "rgba(252, 165, 165, 0.88)";
+      button.textContent = "[]";
+      return;
+    }
+
+    button.title = "Start voice input";
+    button.style.opacity = state.pending ? "0.6" : "0.95";
+    button.style.cursor = state.pending ? "not-allowed" : "pointer";
+    button.style.background = "rgba(30, 64, 175, 0.28)";
+    button.style.borderColor = "rgba(147, 197, 253, 0.5)";
+    button.textContent = "M";
+  }
+
+  function applySpeechResultToInput(interimText = "") {
+    const input = getInput();
+    if (!input) return;
+    const composed = `${state.speechBaseText}${state.speechFinalText}${interimText}`.replace(
+      /\s+/g,
+      " "
+    );
+    input.value = composed.trimStart();
+  }
+
+  function ensureSpeechRecognition() {
+    if (!state.speechSupported) return null;
+    if (state.speechRecognition) return state.speechRecognition;
+
+    const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (typeof Ctor !== "function") {
+      state.speechSupported = false;
+      updateMicButtonVisualState();
+      return null;
+    }
+
+    const recognition = new Ctor();
+    recognition.lang = document.documentElement?.lang || "en-US";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      state.speechRecording = true;
+      state.speechAutoSubmitPending = false;
+      clearSpeechAutoSubmitTimer();
+      updateMicButtonVisualState();
+    };
+
+    recognition.onresult = (event) => {
+      let interimText = "";
+      let finalTextChunk = "";
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = normalizeText(result?.[0]?.transcript || "");
+        if (!transcript) continue;
+
+        if (result.isFinal) {
+          finalTextChunk += `${transcript} `;
+        } else {
+          interimText += `${transcript} `;
+        }
+      }
+
+      if (finalTextChunk) {
+        state.speechFinalText += finalTextChunk;
+      }
+      applySpeechResultToInput(interimText);
+      scheduleSpeechAutoSubmit();
+    };
+
+    recognition.onerror = () => {
+      clearSpeechAutoSubmitTimer();
+      if (!(state.speechStopRequested && state.speechAutoSubmitPending)) {
+        state.speechAutoSubmitPending = false;
+      }
+      state.speechRecording = false;
+      updateMicButtonVisualState();
+    };
+
+    recognition.onend = () => {
+      clearSpeechAutoSubmitTimer();
+      state.speechRecording = false;
+      const shouldAutoSubmit = state.speechAutoSubmitPending;
+      state.speechAutoSubmitPending = false;
+      if (!state.speechStopRequested || shouldAutoSubmit) {
+        applySpeechResultToInput("");
+      }
+      state.speechStopRequested = false;
+      updateMicButtonVisualState();
+      if (shouldAutoSubmit) {
+        submitPromptFromSpeechIfReady();
+      }
+    };
+
+    state.speechRecognition = recognition;
+    return recognition;
+  }
+
+  function toggleSpeechRecognition() {
+    if (state.pending) return;
+    if (!state.speechSupported) {
+      updateMicButtonVisualState();
+      return;
+    }
+
+    if (state.speechRecording) {
+      stopSpeechRecognition({ preserveText: true });
+      return;
+    }
+
+    const input = getInput();
+    if (!input) return;
+    const recognition = ensureSpeechRecognition();
+    if (!recognition) return;
+
+    state.speechStopRequested = false;
+    state.speechBaseText = input.value.trim();
+    if (state.speechBaseText) {
+      state.speechBaseText += " ";
+    }
+    state.speechFinalText = "";
+    state.speechAutoSubmitPending = false;
+    clearSpeechAutoSubmitTimer();
+
+    try {
+      recognition.start();
+    } catch (error) {
+      state.speechRecording = false;
+      updateMicButtonVisualState();
+    }
+  }
+
   function updateAgentButtonVisualState() {
     const button = getPanelAgentButton();
     if (!button) return;
@@ -1099,6 +1474,7 @@
     state.pending = true;
     state.agentRunning = true;
     state.agentStopRequested = false;
+    stopSpeechRecognition({ preserveText: true });
     input.disabled = true;
     input.value = "";
     hideBottomGradient();
@@ -1112,6 +1488,7 @@
       applyPanelBodyVisibility();
     }
     updateAgentButtonVisualState();
+    updateMicButtonVisualState();
 
     const logs = [];
     const history = [];
@@ -1223,6 +1600,7 @@
       state.pending = false;
       state.agentStopRequested = false;
       updateAgentButtonVisualState();
+      updateMicButtonVisualState();
       if (requestId === state.requestId) {
         input.disabled = false;
         input.focus();
@@ -2096,6 +2474,16 @@
     minimizeButton.textContent = "-";
     minimizeButton.style.opacity = "0.96";
 
+    const ttsButton = createArchiveButton({
+      title: "Read response aloud",
+      background: "rgba(16, 185, 129, 0.36)",
+      borderColor: "rgba(110, 231, 183, 0.75)",
+      textColor: "#052e16"
+    });
+    ttsButton.textContent = "S";
+    ttsButton.style.opacity = "0.95";
+
+    actionRow.appendChild(ttsButton);
     actionRow.appendChild(pinButton);
     actionRow.appendChild(closeButton);
     actionRow.appendChild(minimizeButton);
@@ -2206,6 +2594,9 @@
     let archiveWidth = initialWidth;
     let archiveHeight = initialHeight;
     let archiveStoredHeight = initialHeight;
+    let archiveTtsPending = false;
+    let archiveTtsPlaying = false;
+    let archiveTtsAudio = null;
     let conversationHistory = trimConversationHistory(initialConversation);
     if (conversationHistory.length === 0 && promptText && answerText) {
       conversationHistory.push({ user: promptText, assistant: answerText });
@@ -2223,6 +2614,39 @@
       archive.style.background = archivePinned ? BAR_BG_PINNED : BAR_BG_UNPINNED;
       responseWrap.style.background = archivePinned ? PANEL_BG_PINNED : PANEL_BG_UNPINNED;
       chatRow.style.display = archivePinned ? "none" : "flex";
+    }
+
+    function stopArchiveTts() {
+      if (archiveTtsAudio) {
+        try {
+          archiveTtsAudio.pause();
+        } catch (error) {
+          // Ignore pause errors for detached tabs.
+        }
+        archiveTtsAudio = null;
+      }
+      archiveTtsPlaying = false;
+    }
+
+    function updateArchiveTtsState() {
+      if (archiveTtsPending) {
+        ttsButton.title = "Generating speech...";
+        ttsButton.style.opacity = "0.65";
+        ttsButton.style.cursor = "wait";
+        ttsButton.textContent = "...";
+        return;
+      }
+      if (archiveTtsPlaying) {
+        ttsButton.title = "Stop speech";
+        ttsButton.style.opacity = "1";
+        ttsButton.style.cursor = "pointer";
+        ttsButton.textContent = "[]";
+        return;
+      }
+      ttsButton.title = "Read response aloud";
+      ttsButton.style.opacity = "0.95";
+      ttsButton.style.cursor = "pointer";
+      ttsButton.textContent = "S";
     }
 
     function updateArchiveMinimizeState() {
@@ -2273,6 +2697,9 @@
       promptCopy.textContent = prompt;
       answerCopy.style.color = "rgba(226, 232, 240, 0.95)";
       answerCopy.textContent = "Analyzing your request with page context...";
+      stopArchiveTts();
+      archiveTtsPending = false;
+      updateArchiveTtsState();
 
       const requestPrompt = buildPromptWithConversation(prompt, conversationHistory);
       try {
@@ -2324,7 +2751,53 @@
     closeButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      stopArchiveTts();
       archive.remove();
+    });
+
+    ttsButton.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (archiveTtsPending) return;
+      if (archiveTtsPlaying) {
+        stopArchiveTts();
+        updateArchiveTtsState();
+        return;
+      }
+
+      const text = typeof answerCopy.textContent === "string" ? answerCopy.textContent.trim() : "";
+      if (!text) return;
+
+      archiveTtsPending = true;
+      updateArchiveTtsState();
+      try {
+        const result = await requestSpeechAudio(text);
+        if (!archive.isConnected) {
+          return;
+        }
+        const audio = new Audio(`data:${result.mimeType};base64,${result.audioBase64}`);
+        stopArchiveTts();
+        archiveTtsAudio = audio;
+        archiveTtsPlaying = true;
+        updateArchiveTtsState();
+
+        const resetAudioState = () => {
+          if (archiveTtsAudio === audio) {
+            archiveTtsAudio = null;
+            archiveTtsPlaying = false;
+            updateArchiveTtsState();
+          }
+        };
+        audio.addEventListener("ended", resetAudioState, { once: true });
+        audio.addEventListener("error", resetAudioState, { once: true });
+        await audio.play();
+      } catch (error) {
+        stopArchiveTts();
+      } finally {
+        archiveTtsPending = false;
+        updateArchiveTtsState();
+      }
     });
 
     minimizeButton.addEventListener("click", (event) => {
@@ -2462,6 +2935,7 @@
 
     updateArchivePinState();
     updateArchiveMinimizeState();
+    updateArchiveTtsState();
     positionArchiveWithinBounds();
   }
 
@@ -2493,13 +2967,21 @@
       return;
     }
 
-    answer.textContent = text;
+    const nextText = typeof text === "string" ? text : "";
+    const answerChanged = answer.textContent !== nextText;
+    if (answerChanged && (state.ttsPlaying || state.ttsPending)) {
+      stopTtsPlayback();
+      state.ttsPending = false;
+    }
+
+    answer.textContent = nextText;
     answer.style.opacity = muted ? "0.75" : "1";
     answer.style.color = error ? "#fca5a5" : INPUT_COLOR;
     answer.style.borderColor = error ? "rgba(252, 165, 165, 0.45)" : "rgba(255, 255, 255, 0.08)";
     answer.style.background = error ? "rgba(127, 29, 29, 0.26)" : "rgba(15, 23, 42, 0.35)";
 
     renderChainOfThought(chainOfThought, { muted });
+    updateTtsButtonVisualState();
 
     if (state.expanded) requestAnimationFrame(resizePanelToContent);
   }
@@ -2584,7 +3066,9 @@
     const requestId = ++state.requestId;
     state.pending = true;
     input.disabled = true;
+    stopSpeechRecognition({ preserveText: true });
     updateAgentButtonVisualState();
+    updateMicButtonVisualState();
     input.value = "";
     hideBottomGradient();
     const pageContext = buildPageContext();
@@ -2661,6 +3145,7 @@
       state.pending = false;
       input.disabled = false;
       updateAgentButtonVisualState();
+      updateMicButtonVisualState();
       input.focus();
       input.select();
     }
@@ -2826,6 +3311,37 @@
       }
     });
 
+    const micButton = document.createElement("button");
+    micButton.id = BAR_MIC_BUTTON_ID;
+    micButton.type = "button";
+    micButton.title = "Start voice input";
+    micButton.textContent = "M";
+    Object.assign(micButton.style, {
+      width: "30px",
+      height: "30px",
+      borderRadius: "9999px",
+      border: "1px solid rgba(147, 197, 253, 0.5)",
+      background: "rgba(30, 64, 175, 0.28)",
+      color: "#dbeafe",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "pointer",
+      padding: "0",
+      fontSize: "11px",
+      fontWeight: "700",
+      lineHeight: "1",
+      opacity: "0.95",
+      transition: "all 150ms ease",
+      flexShrink: "0"
+    });
+    micButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    micButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleSpeechRecognition();
+    });
+
     /* ── send hint icon (decorative) ── */
     const sendHint = document.createElement("div");
     Object.assign(sendHint.style, {
@@ -2857,6 +3373,7 @@
     inputRow.appendChild(agentButton);
     inputRow.appendChild(attachmentStrip);
     inputRow.appendChild(input);
+    inputRow.appendChild(micButton);
     inputRow.appendChild(sendHint);
     bar.appendChild(inputRow);
 
@@ -2908,6 +3425,37 @@
       alignItems: "center",
       gap: "6px"
     });
+
+    const ttsButton = document.createElement("button");
+    ttsButton.id = PANEL_TTS_BUTTON_ID;
+    ttsButton.type = "button";
+    ttsButton.title = "Read response aloud";
+    ttsButton.textContent = "S";
+    Object.assign(ttsButton.style, {
+      width: "24px",
+      height: "24px",
+      borderRadius: "9999px",
+      border: "1px solid rgba(110, 231, 183, 0.75)",
+      background: "rgba(16, 185, 129, 0.36)",
+      color: "#052e16",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "pointer",
+      padding: "0",
+      fontSize: "11px",
+      fontWeight: "700",
+      lineHeight: "1",
+      opacity: "0.95",
+      transition: "all 150ms ease"
+    });
+    ttsButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    ttsButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void speakPanelAnswer();
+    });
+    panelActions.appendChild(ttsButton);
 
     const pinButton = document.createElement("button");
     pinButton.id = PANEL_PIN_BUTTON_ID;
@@ -3287,6 +3835,8 @@
     /* ── mount ── */
     (document.body || document.documentElement).appendChild(bar);
     setAgentModeEnabled(state.agentModeEnabled);
+    updateMicButtonVisualState();
+    updateTtsButtonVisualState();
     renderAttachmentStrip();
 
     /* slide in */
@@ -3309,7 +3859,9 @@
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        if (state.agentRunning) {
+        if (state.speechRecording) {
+          stopSpeechRecognition({ preserveText: true });
+        } else if (state.agentRunning) {
           state.agentStopRequested = true;
           setAgentStatus("Agent: stopping...");
         } else if (state.expanded) {
@@ -3396,10 +3948,15 @@
     state.pending = false;
     state.agentStopRequested = true;
     state.agentRunning = false;
+    stopSpeechRecognition({ preserveText: true });
+    state.ttsPending = false;
+    stopTtsPlayback();
     removeAgentOverlay();
     const input = getInput();
     if (input) input.disabled = false;
     updateAgentButtonVisualState();
+    updateMicButtonVisualState();
+    updateTtsButtonVisualState();
 
     /* first collapse panel if open */
     if (state.expanded) collapsePanel();
@@ -3456,6 +4013,14 @@
     state.pending = false;
     state.agentRunning = false;
     state.agentStopRequested = false;
+    state.speechRecording = false;
+    state.speechStopRequested = false;
+    state.speechBaseText = "";
+    state.speechFinalText = "";
+    state.speechAutoSubmitPending = false;
+    clearSpeechAutoSubmitTimer();
+    state.ttsPending = false;
+    stopTtsPlayback();
     state.pinned = false;
     state.currentTabHasResponse = false;
     state.currentConversation = [];
@@ -3484,6 +4049,9 @@
     finishScreenCaptureOverlay();
     state.agentStopRequested = true;
     state.agentRunning = false;
+    stopSpeechRecognition({ preserveText: true });
+    state.ttsPending = false;
+    stopTtsPlayback();
     removeAgentOverlay();
     if (state.visible) {
       dismissBar();
@@ -3494,6 +4062,9 @@
   function openNewToolboxTab() {
     finishScreenCaptureOverlay();
     state.agentStopRequested = true;
+    stopSpeechRecognition({ preserveText: true });
+    state.ttsPending = false;
+    stopTtsPlayback();
     removeAgentOverlay();
     removeFloatingUI();
 

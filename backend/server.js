@@ -9,6 +9,10 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_MAX_OUTPUT_TOKENS = Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || 1400);
 const OPENAI_SYSTEM_PROMPT = process.env.OPENAI_SYSTEM_PROMPT || "";
 const OPENAI_API_URL = "https://api.openai.com/v1/responses";
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "EXAVITQu4vr4xnSDxMaL";
+const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
+const ELEVENLABS_API_URL = "https://api.elevenlabs.io/v1/text-to-speech";
 const CONTEXT_URL_MAX_CHARS = 500;
 const CONTEXT_TITLE_MAX_CHARS = 500;
 const CONTEXT_SELECTION_MAX_CHARS = 2000;
@@ -27,6 +31,7 @@ const AGENT_ELEMENT_TEXT_MAX_CHARS = 120;
 const AGENT_HISTORY_MAX_ITEMS = 8;
 const AGENT_HISTORY_TEXT_MAX_CHARS = 220;
 const AGENT_GOAL_MAX_CHARS = 800;
+const TTS_TEXT_MAX_CHARS = 2500;
 
 if (typeof fetch !== "function") {
   console.error("Node 18+ is required because global fetch is missing.");
@@ -76,6 +81,13 @@ function truncateText(value, maxChars) {
   if (!text) return "";
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}\n...[truncated]`;
+}
+
+function trimToMaxChars(value, maxChars) {
+  const text = toTrimmedString(value);
+  if (!text) return "";
+  if (text.length <= maxChars) return text;
+  return text.slice(0, maxChars);
 }
 
 function buildPageContextText(pageContext) {
@@ -740,6 +752,83 @@ app.post("/api/agent/step", async (req, res) => {
       error instanceof Error && error.message
         ? error.message
         : "Unexpected backend error while planning agent step.";
+    res.status(500).json({ error: message });
+  }
+});
+
+app.post("/api/tts", async (req, res) => {
+  if (!ELEVENLABS_API_KEY) {
+    res.status(500).json({
+      error:
+        "Missing ELEVENLABS_API_KEY in backend .env file. Add your key to enable text-to-speech."
+    });
+    return;
+  }
+
+  const text = trimToMaxChars(req.body?.text, TTS_TEXT_MAX_CHARS);
+  if (!text) {
+    res.status(400).json({ error: "Field 'text' is required." });
+    return;
+  }
+
+  const voiceId = trimToMaxChars(ELEVENLABS_VOICE_ID, 120);
+  if (!voiceId) {
+    res.status(500).json({
+      error: "Missing ELEVENLABS_VOICE_ID in backend .env file."
+    });
+    return;
+  }
+
+  const modelId = trimToMaxChars(ELEVENLABS_MODEL_ID, 120) || "eleven_multilingual_v2";
+  const endpoint = `${ELEVENLABS_API_URL}/${encodeURIComponent(voiceId)}`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "audio/mpeg",
+        "xi-api-key": ELEVENLABS_API_KEY
+      },
+      body: JSON.stringify({
+        text,
+        model_id: modelId
+      })
+    });
+
+    if (!response.ok) {
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (error) {
+        payload = null;
+      }
+      const upstreamError =
+        payload?.detail?.message || payload?.detail || payload?.error?.message || payload?.message;
+      res.status(response.status).json({
+        error: upstreamError || `ElevenLabs API failed with status ${response.status}.`
+      });
+      return;
+    }
+
+    const audioArrayBuffer = await response.arrayBuffer();
+    const audioBuffer = Buffer.from(audioArrayBuffer);
+    if (!audioBuffer.length) {
+      res.status(502).json({
+        error: "ElevenLabs API returned an empty audio response."
+      });
+      return;
+    }
+
+    res.json({
+      audioBase64: audioBuffer.toString("base64"),
+      mimeType: "audio/mpeg"
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error && error.message
+        ? error.message
+        : "Unexpected backend error while generating speech.";
     res.status(500).json({ error: message });
   }
 });

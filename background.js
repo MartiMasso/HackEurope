@@ -1,9 +1,11 @@
 const TOGGLE_MESSAGE_TYPE = "TOGGLE_TOOLBOX_BUBBLE";
 const CHAT_MESSAGE_TYPE = "TOOLBOX_CHAT_REQUEST";
 const AGENT_MESSAGE_TYPE = "TOOLBOX_AGENT_REQUEST";
+const TTS_MESSAGE_TYPE = "TOOLBOX_TTS_REQUEST";
 const CAPTURE_MESSAGE_TYPE = "TOOLBOX_CAPTURE_VISIBLE_TAB";
 const BACKEND_CHAT_URL = "http://127.0.0.1:8787/api/chat";
 const BACKEND_AGENT_URL = "http://127.0.0.1:8787/api/agent/step";
+const BACKEND_TTS_URL = "http://127.0.0.1:8787/api/tts";
 const BACKEND_AGENT_FALLBACK_URLS = [
   BACKEND_AGENT_URL,
   "http://127.0.0.1:8787/api/agent-step",
@@ -91,6 +93,43 @@ async function askLocalAgent(goal, pageContext, actionableElements, history = []
   );
 }
 
+async function askLocalTts(text) {
+  const response = await fetch(BACKEND_TTS_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ text })
+  });
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const errorMessage =
+      payload && typeof payload.error === "string"
+        ? payload.error
+        : `Error del backend TTS (${response.status}).`;
+    throw new Error(errorMessage);
+  }
+
+  if (!payload || typeof payload.audioBase64 !== "string" || !payload.audioBase64.trim()) {
+    throw new Error("El backend TTS devolvió audio vacío.");
+  }
+
+  return {
+    audioBase64: payload.audioBase64.trim(),
+    mimeType:
+      typeof payload.mimeType === "string" && payload.mimeType.trim()
+        ? payload.mimeType.trim()
+        : "audio/mpeg"
+  };
+}
+
 function captureVisibleTab(windowId) {
   return new Promise((resolve, reject) => {
     const captureTarget = Number.isFinite(windowId) ? windowId : undefined;
@@ -144,16 +183,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message.type !== CHAT_MESSAGE_TYPE) {
-    if (message.type !== AGENT_MESSAGE_TYPE) {
-      return;
-    }
-
+  if (message.type === AGENT_MESSAGE_TYPE) {
     const goal = typeof message.goal === "string" ? message.goal.trim() : "";
     if (!goal) {
       sendResponse({ ok: false, error: "Agent goal is empty." });
       return;
     }
+
     const pageContext =
       message.pageContext && typeof message.pageContext === "object" ? message.pageContext : null;
     const actionableElements = Array.isArray(message.actionableElements)
@@ -179,6 +215,36 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
 
     return true;
+  }
+
+  if (message.type === TTS_MESSAGE_TYPE) {
+    const text = typeof message.text === "string" ? message.text.trim() : "";
+    if (!text) {
+      sendResponse({ ok: false, error: "TTS text is empty." });
+      return;
+    }
+
+    askLocalTts(text)
+      .then((result) => {
+        sendResponse({
+          ok: true,
+          audioBase64: result.audioBase64,
+          mimeType: result.mimeType
+        });
+      })
+      .catch((error) => {
+        const messageText =
+          error instanceof Error && error.message
+            ? error.message
+            : "No se pudo contactar con el backend TTS.";
+        sendResponse({ ok: false, error: messageText });
+      });
+
+    return true;
+  }
+
+  if (message.type !== CHAT_MESSAGE_TYPE) {
+    return;
   }
 
   const prompt = typeof message.prompt === "string" ? message.prompt.trim() : "";
