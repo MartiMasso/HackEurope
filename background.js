@@ -62,7 +62,7 @@ chrome.action.onClicked.addListener((tab) => {
   chrome.tabs.sendMessage(tab.id, { type: TOGGLE_MESSAGE_TYPE }, () => {
     if (chrome.runtime.lastError) {
       // Expected on restricted pages like chrome://, edge:// or the Web Store.
-      console.debug("Toolbox Bubble not toggled:", chrome.runtime.lastError.message);
+      console.debug("Toolbox not toggled:", chrome.runtime.lastError.message);
     }
   });
 });

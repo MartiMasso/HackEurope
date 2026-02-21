@@ -4,11 +4,17 @@
    * ================================================================ */
   const BAR_CONTAINER_ID = "__toolbox_bar_container__";
   const BAR_INPUT_ID = "__toolbox_bar_input__";
+  const BAR_INPUT_ROW_ID = "__toolbox_bar_input_row__";
   const BAR_GRADIENT_ID = "__toolbox_bottom_gradient__";
   const PANEL_ID = "__toolbox_panel__";
   const PANEL_CONTENT_ID = "__toolbox_panel_content__";
+  const PANEL_PROMPT_ID = "__toolbox_panel_prompt__";
   const PANEL_ANSWER_ID = "__toolbox_panel_answer__";
   const PANEL_COT_ID = "__toolbox_panel_chain_of_thought__";
+  const PANEL_PIN_BUTTON_ID = "__toolbox_panel_pin_button__";
+  const PANEL_CLOSE_BUTTON_ID = "__toolbox_panel_close_button__";
+  const PANEL_MINIMIZE_BUTTON_ID = "__toolbox_panel_minimize_button__";
+  const ARCHIVE_TAB_CLASS = "__toolbox_archive_tab__";
   const BAR_ATTACHMENTS_ID = "__toolbox_bar_attachments__";
   const FLOATING_ICON_ID = "__toolbox_icon__";
   const FLOATING_NODE_ID_PREFIX = "__toolbox_node__";
@@ -19,11 +25,14 @@
   const CHAT_MESSAGE_TYPE = "TOOLBOX_CHAT_REQUEST";
   const CAPTURE_MESSAGE_TYPE = "TOOLBOX_CAPTURE_VISIBLE_TAB";
   const ICON_SRC = chrome.runtime.getURL("assets/icon.png");
+  const PIN_ICON_SRC = chrome.runtime.getURL("assets/pin.png");
 
   /* ================================================================
    *  DIMENSION & STYLE CONSTANTS
    * ================================================================ */
   const BAR_WIDTH_PX = 520;
+  const BAR_MIN_WIDTH_PX = 360;
+  const BAR_MAX_WIDTH_PX = 920;
   const BAR_HEIGHT_PX = 54;
   const BAR_RADIUS_PX = 27;
   const BAR_BOTTOM_PX = 18;
@@ -52,6 +61,10 @@
 
   /* ── colours ── */
   const BG_COLOR = "rgba(17, 24, 39, 0.92)";
+  const BAR_BG_UNPINNED = "rgba(17, 24, 39, 0.72)";
+  const BAR_BG_PINNED = "rgba(17, 24, 39, 0.9)";
+  const PANEL_BG_UNPINNED = "rgba(17, 24, 39, 0.66)";
+  const PANEL_BG_PINNED = "rgba(17, 24, 39, 0.86)";
   const BG_BLUR = "blur(18px)";
   const BORDER_COLOR = "rgba(255, 255, 255, 0.08)";
   const INPUT_COLOR = "#f3f4f6";
@@ -64,10 +77,16 @@
   const state = {
     visible: false,
     expanded: false,   // results panel open
+    panelBodyHidden: false,
     pending: false,
     requestId: 0,
     barBottom: BAR_BOTTOM_PX,
     barLeft: 0,        // will be centred on create
+    barTop: 0,
+    barWidth: BAR_WIDTH_PX,
+    pinned: false,
+    currentTabHasResponse: false,
+    currentConversation: [],
     onResize: null,
     onKeydown: null,
     floatingExpanded: false,
@@ -101,17 +120,29 @@
   function getInput() {
     return getEl(BAR_INPUT_ID);
   }
+  function getInputRow() {
+    return getEl(BAR_INPUT_ROW_ID);
+  }
   function getPanel() {
     return getEl(PANEL_ID);
   }
   function getPanelContent() {
     return getEl(PANEL_CONTENT_ID);
   }
+  function getPanelPrompt() {
+    return getEl(PANEL_PROMPT_ID);
+  }
   function getPanelAnswer() {
     return getEl(PANEL_ANSWER_ID);
   }
   function getPanelChainOfThought() {
     return getEl(PANEL_COT_ID);
+  }
+  function getPanelPinButton() {
+    return getEl(PANEL_PIN_BUTTON_ID);
+  }
+  function getPanelMinimizeButton() {
+    return getEl(PANEL_MINIMIZE_BUTTON_ID);
   }
   function getAttachmentStrip() {
     return getEl(BAR_ATTACHMENTS_ID);
@@ -130,6 +161,26 @@
   }
   function getScreenCaptureOverlay() {
     return getEl(SCREENSHOT_OVERLAY_ID);
+  }
+  function getDocumentSize() {
+    const docEl = document.documentElement;
+    const body = document.body;
+    return {
+      width: Math.max(docEl?.scrollWidth || 0, body?.scrollWidth || 0, window.innerWidth),
+      height: Math.max(docEl?.scrollHeight || 0, body?.scrollHeight || 0, window.innerHeight)
+    };
+  }
+
+  function showBottomGradient() {
+    const gradient = getBottomGradient();
+    if (!gradient) return;
+    gradient.style.opacity = "1";
+  }
+
+  function hideBottomGradient() {
+    const gradient = getBottomGradient();
+    if (!gradient) return;
+    gradient.style.opacity = "0";
   }
 
   function ensureBottomGradient() {
@@ -992,11 +1043,21 @@
 
   function computePanelMaxHeight() {
     const bar = getBar();
-    const barBottom = bar ? parseFloat(bar.style.bottom) || state.barBottom : state.barBottom;
-    const availableAboveBar = Math.max(
-      110,
-      window.innerHeight - Math.max(0, barBottom) - BAR_HEIGHT_PX - 24
-    );
+    if (!bar) return PANEL_MIN_HEIGHT_PX;
+    let availableAboveBar = 0;
+    if (state.pinned) {
+      const rect = bar.getBoundingClientRect();
+      availableAboveBar = Math.max(
+        110,
+        window.innerHeight - Math.max(0, rect.top) - BAR_HEIGHT_PX - 28
+      );
+    } else {
+      const barBottom = parseFloat(bar.style.bottom) || state.barBottom;
+      availableAboveBar = Math.max(
+        110,
+        window.innerHeight - Math.max(0, barBottom) - BAR_HEIGHT_PX - 24
+      );
+    }
     const ratioCap = Math.floor(window.innerHeight * PANEL_MAX_HEIGHT_RATIO);
     return Math.max(110, Math.min(PANEL_MAX_HEIGHT_PX, ratioCap, availableAboveBar));
   }
@@ -1005,6 +1066,10 @@
     const panel = getPanel();
     const panelContent = getPanelContent();
     if (!panel || !panelContent || !state.expanded) return;
+    if (state.panelBodyHidden) {
+      panel.style.maxHeight = "40px";
+      return;
+    }
 
     const maxHeight = computePanelMaxHeight();
     const minHeight = Math.min(PANEL_MIN_HEIGHT_PX, maxHeight);
@@ -1079,9 +1144,647 @@
     });
   }
 
-  function setPanelContent(text, { muted = false, error = false, chainOfThought = [] } = {}) {
+  function updatePinButtonVisualState() {
+    const pinButton = getPanelPinButton();
+    if (!pinButton) return;
+    pinButton.title = state.pinned ? "Unpin response panel" : "Pin response panel";
+    pinButton.style.opacity = state.pinned ? "1" : "0.9";
+    pinButton.style.borderColor = state.pinned
+      ? "rgba(125, 211, 252, 0.9)"
+      : "rgba(125, 211, 252, 0.65)";
+    pinButton.style.background = state.pinned
+      ? "rgba(56, 189, 248, 0.65)"
+      : "rgba(56, 189, 248, 0.45)";
+    pinButton.style.transform = state.pinned ? "scale(1.04)" : "scale(1)";
+  }
+
+  function updateMinimizeButtonVisualState() {
+    const minimizeButton = getPanelMinimizeButton();
+    if (!minimizeButton) return;
+    const minimized = !state.expanded || state.panelBodyHidden;
+    minimizeButton.title = minimized ? "Expand response panel" : "Make panel smaller";
+    minimizeButton.style.opacity = minimized ? "1" : "0.92";
+    minimizeButton.style.borderColor = minimized
+      ? "rgba(253, 224, 71, 0.92)"
+      : "rgba(253, 224, 71, 0.7)";
+    minimizeButton.style.background = minimized
+      ? "rgba(250, 204, 21, 0.84)"
+      : "rgba(250, 204, 21, 0.62)";
+  }
+
+  function togglePanelCompact() {
+    if (!state.expanded) {
+      expandPanel();
+      return;
+    }
+    state.panelBodyHidden = !state.panelBodyHidden;
+    applyPanelBodyVisibility();
+    if (!state.panelBodyHidden) {
+      requestAnimationFrame(resizePanelToContent);
+    }
+    updateMinimizeButtonVisualState();
+  }
+
+  function applyPanelBodyVisibility() {
+    const prompt = getPanelPrompt();
+    const answer = getPanelAnswer();
+    const chain = getPanelChainOfThought();
+    const panel = getPanel();
+    if (!panel || !answer) return;
+
+    if (state.panelBodyHidden) {
+      if (prompt) prompt.style.display = "none";
+      answer.style.display = "none";
+      if (chain) chain.style.display = "none";
+      panel.style.maxHeight = "40px";
+      panel.style.opacity = "1";
+      panel.style.marginTop = "2px";
+      return;
+    }
+
+    if (prompt) {
+      const hasPrompt = typeof prompt.textContent === "string" && prompt.textContent.trim().length > 0;
+      prompt.style.display = hasPrompt ? "block" : "none";
+    }
+    answer.style.display = "block";
+    if (chain && chain.children.length > 0) {
+      chain.style.display = "flex";
+    }
+  }
+
+  function updateActivePinnedVisualState() {
+    const bar = getBar();
+    const panel = getPanel();
+    const inputRow = getInputRow();
+    if (!bar || !panel) return;
+
+    bar.style.background = state.pinned ? BAR_BG_PINNED : BAR_BG_UNPINNED;
+    panel.style.background = state.pinned ? PANEL_BG_PINNED : PANEL_BG_UNPINNED;
+
+    if (inputRow) {
+      inputRow.style.display = state.pinned ? "none" : "flex";
+    }
+  }
+
+  function togglePinnedBar() {
+    const bar = getBar();
+    if (!bar) return;
+    const currentWidth = Math.max(BAR_MIN_WIDTH_PX, state.barWidth || bar.offsetWidth || BAR_WIDTH_PX);
+    hideBottomGradient();
+
+    if (!state.pinned) {
+      const rect = bar.getBoundingClientRect();
+      const docSize = getDocumentSize();
+      const nextLeft = clamp(rect.left + window.scrollX, 0, Math.max(0, docSize.width - currentWidth));
+      const nextTop = clamp(
+        rect.top + window.scrollY,
+        0,
+        Math.max(0, docSize.height - bar.offsetHeight - 12)
+      );
+
+      state.pinned = true;
+      state.barLeft = nextLeft;
+      state.barTop = nextTop;
+      bar.style.position = "absolute";
+      bar.style.bottom = "auto";
+      bar.style.top = `${nextTop}px`;
+      bar.style.left = `${nextLeft}px`;
+      bar.style.transition = `opacity ${SLIDE_DURATION_MS}ms ease`;
+    } else {
+      const rect = bar.getBoundingClientRect();
+      const nextLeft = clamp(rect.left, 0, Math.max(0, window.innerWidth - currentWidth));
+      const currentBottom = window.innerHeight - rect.bottom;
+      const nextBottom = clamp(currentBottom, 0, Math.max(0, window.innerHeight - BAR_HEIGHT_PX - 20));
+
+      state.pinned = false;
+      state.barLeft = nextLeft;
+      state.barBottom = nextBottom;
+      bar.style.position = "fixed";
+      bar.style.top = "auto";
+      bar.style.bottom = `${nextBottom}px`;
+      bar.style.left = `${nextLeft}px`;
+      bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
+    }
+
+    updateActivePinnedVisualState();
+    updatePinButtonVisualState();
+    updateMinimizeButtonVisualState();
+    if (state.expanded) requestAnimationFrame(resizePanelToContent);
+  }
+
+  function createArchivedResponseTab(initialConversation = []) {
+    const bar = getBar();
+    const promptElement = getPanelPrompt();
+    const answerElement = getPanelAnswer();
+    const mountTarget = document.body || document.documentElement;
+    if (!bar || !answerElement || !mountTarget) return;
+
+    const promptText = typeof promptElement?.textContent === "string"
+      ? promptElement.textContent.trim()
+      : "";
+    const answerText = typeof answerElement.textContent === "string"
+      ? answerElement.textContent.trim()
+      : "";
+    if (!answerText) return;
+
+    const rect = bar.getBoundingClientRect();
+    const initialWidth = clamp(state.barWidth || rect.width || BAR_WIDTH_PX, BAR_MIN_WIDTH_PX, BAR_MAX_WIDTH_PX);
+    const initialLeft = clamp(rect.left, 0, Math.max(0, window.innerWidth - initialWidth));
+    const initialTop = clamp(rect.top, 0, Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, rect.height) - 12));
+
+    const archive = document.createElement("div");
+    archive.className = ARCHIVE_TAB_CLASS;
+    Object.assign(archive.style, {
+      position: "fixed",
+      left: `${initialLeft}px`,
+      top: `${initialTop}px`,
+      width: `${initialWidth}px`,
+      borderRadius: `${BAR_RADIUS_PX}px`,
+      background: BAR_BG_UNPINNED,
+      backdropFilter: BG_BLUR,
+      WebkitBackdropFilter: BG_BLUR,
+      border: `1px solid ${BORDER_COLOR}`,
+      boxShadow: "0 12px 30px rgba(0, 0, 0, 0.35)",
+      padding: "8px 12px 10px",
+      display: "flex",
+      flexDirection: "column",
+      gap: "8px",
+      boxSizing: "border-box",
+      cursor: "grab",
+      userSelect: "none",
+      touchAction: "none",
+      zIndex: "2147483646"
+    });
+
+    const actionRow = document.createElement("div");
+    Object.assign(actionRow.style, {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "flex-end",
+      gap: "6px"
+    });
+
+    function createArchiveButton({ title, background, borderColor, textColor = "#0f172a" }) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.title = title;
+      Object.assign(button.style, {
+        width: "22px",
+        height: "22px",
+        borderRadius: "9999px",
+        border: `1px solid ${borderColor}`,
+        background,
+        color: textColor,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        cursor: "pointer",
+        padding: "0",
+        fontWeight: "700",
+        fontSize: "11px",
+        lineHeight: "1",
+        transition: "opacity 150ms ease, transform 150ms ease"
+      });
+      button.addEventListener("pointerdown", (event) => event.stopPropagation());
+      button.addEventListener("pointerenter", () => {
+        button.style.opacity = "1";
+      });
+      return button;
+    }
+
+    const pinButton = createArchiveButton({
+      title: "Pin tab",
+      background: "rgba(56, 189, 248, 0.45)",
+      borderColor: "rgba(125, 211, 252, 0.72)",
+      textColor: "#082f49"
+    });
+    pinButton.style.opacity = "0.9";
+    const pinIcon = document.createElement("img");
+    pinIcon.src = PIN_ICON_SRC;
+    pinIcon.alt = "Pin response";
+    Object.assign(pinIcon.style, {
+      width: "10px",
+      height: "10px",
+      objectFit: "contain",
+      pointerEvents: "none"
+    });
+    pinButton.appendChild(pinIcon);
+
+    const closeButton = createArchiveButton({
+      title: "Close tab",
+      background: "rgba(248, 113, 113, 0.86)",
+      borderColor: "rgba(252, 165, 165, 0.95)",
+      textColor: "#450a0a"
+    });
+    closeButton.textContent = "x";
+    closeButton.style.opacity = "0.95";
+
+    const minimizeButton = createArchiveButton({
+      title: "Make tab smaller",
+      background: "rgba(250, 204, 21, 0.74)",
+      borderColor: "rgba(253, 224, 71, 0.92)",
+      textColor: "#713f12"
+    });
+    minimizeButton.textContent = "-";
+    minimizeButton.style.opacity = "0.96";
+
+    const resizeHandle = document.createElement("div");
+    resizeHandle.title = "Resize tab";
+    Object.assign(resizeHandle.style, {
+      width: "12px",
+      height: "12px",
+      borderRight: "2px solid rgba(148, 163, 184, 0.9)",
+      borderBottom: "2px solid rgba(148, 163, 184, 0.9)",
+      transform: "rotate(0deg)",
+      borderRadius: "2px",
+      cursor: "nwse-resize",
+      marginLeft: "4px",
+      opacity: "0.8"
+    });
+    resizeHandle.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+    actionRow.appendChild(pinButton);
+    actionRow.appendChild(closeButton);
+    actionRow.appendChild(minimizeButton);
+    actionRow.appendChild(resizeHandle);
+
+    const responseWrap = document.createElement("div");
+    Object.assign(responseWrap.style, {
+      display: "flex",
+      flexDirection: "column",
+      gap: "10px",
+      border: "1px solid rgba(255, 255, 255, 0.1)",
+      borderRadius: "12px",
+      background: PANEL_BG_UNPINNED,
+      padding: "10px"
+    });
+
+    const promptCopy = document.createElement("div");
+    Object.assign(promptCopy.style, {
+      display: promptText ? "block" : "none",
+      border: "1px solid rgba(147, 197, 253, 0.38)",
+      borderRadius: "12px",
+      background: "rgba(30, 58, 138, 0.24)",
+      color: "rgba(219, 234, 254, 0.95)",
+      padding: "8px 10px",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word",
+      fontSize: "12px",
+      lineHeight: "1.45",
+      fontWeight: "500"
+    });
+    promptCopy.textContent = promptText;
+
+    const answerCopy = document.createElement("div");
+    Object.assign(answerCopy.style, {
+      border: "1px solid rgba(255, 255, 255, 0.08)",
+      borderRadius: "12px",
+      background: "rgba(15, 23, 42, 0.35)",
+      padding: "10px",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word",
+      color: "rgba(226, 232, 240, 0.95)",
+      fontSize: "13px",
+      lineHeight: "1.5"
+    });
+    answerCopy.textContent = answerText;
+
+    responseWrap.appendChild(promptCopy);
+    responseWrap.appendChild(answerCopy);
+
+    const chatRow = document.createElement("div");
+    Object.assign(chatRow.style, {
+      display: "flex",
+      alignItems: "center",
+      gap: "8px"
+    });
+
+    const chatInput = document.createElement("input");
+    chatInput.type = "text";
+    chatInput.placeholder = "Follow up in this tab...";
+    chatInput.autocomplete = "off";
+    chatInput.spellcheck = false;
+    Object.assign(chatInput.style, {
+      flex: "1",
+      height: "30px",
+      borderRadius: "9999px",
+      border: "1px solid rgba(148, 163, 184, 0.35)",
+      background: "rgba(15, 23, 42, 0.45)",
+      color: "#e5e7eb",
+      padding: "0 12px",
+      fontSize: "12px",
+      fontFamily: "inherit",
+      outline: "none"
+    });
+    chatInput.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+    const sendButton = document.createElement("button");
+    sendButton.type = "button";
+    sendButton.textContent = ">";
+    Object.assign(sendButton.style, {
+      width: "24px",
+      height: "24px",
+      borderRadius: "9999px",
+      border: "1px solid rgba(99, 102, 241, 0.45)",
+      background: "rgba(99, 102, 241, 0.36)",
+      color: "#e2e8f0",
+      cursor: "pointer",
+      fontSize: "12px",
+      fontWeight: "700",
+      lineHeight: "1",
+      padding: "0"
+    });
+    sendButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+    chatRow.appendChild(chatInput);
+    chatRow.appendChild(sendButton);
+
+    archive.appendChild(actionRow);
+    archive.appendChild(responseWrap);
+    archive.appendChild(chatRow);
+    mountTarget.appendChild(archive);
+
+    let archivePinned = false;
+    let archiveMinimized = false;
+    let archivePending = false;
+    let archiveWidth = initialWidth;
+    let conversationHistory = trimConversationHistory(initialConversation);
+    if (conversationHistory.length === 0 && promptText && answerText) {
+      conversationHistory.push({ user: promptText, assistant: answerText });
+    }
+
+    function updateArchivePinState() {
+      pinButton.title = archivePinned ? "Unpin tab" : "Pin tab";
+      pinButton.style.background = archivePinned
+        ? "rgba(56, 189, 248, 0.65)"
+        : "rgba(56, 189, 248, 0.45)";
+      pinButton.style.borderColor = archivePinned
+        ? "rgba(125, 211, 252, 0.9)"
+        : "rgba(125, 211, 252, 0.72)";
+      pinButton.style.transform = archivePinned ? "scale(1.03)" : "scale(1)";
+      archive.style.background = archivePinned ? BAR_BG_PINNED : BAR_BG_UNPINNED;
+      responseWrap.style.background = archivePinned ? PANEL_BG_PINNED : PANEL_BG_UNPINNED;
+      chatRow.style.display = archivePinned ? "none" : "flex";
+    }
+
+    function updateArchiveMinimizeState() {
+      minimizeButton.title = archiveMinimized ? "Expand tab" : "Make tab smaller";
+      minimizeButton.style.background = archiveMinimized
+        ? "rgba(250, 204, 21, 0.9)"
+        : "rgba(250, 204, 21, 0.74)";
+      minimizeButton.style.borderColor = archiveMinimized
+        ? "rgba(253, 224, 71, 1)"
+        : "rgba(253, 224, 71, 0.92)";
+      minimizeButton.style.transform = archiveMinimized ? "scale(1.03)" : "scale(1)";
+      responseWrap.style.display = archiveMinimized ? "none" : "flex";
+    }
+
+    function positionArchiveWithinBounds() {
+      const currentRect = archive.getBoundingClientRect();
+      if (archivePinned) {
+        const docSize = getDocumentSize();
+        const nextLeft = clamp(
+          currentRect.left + window.scrollX,
+          0,
+          Math.max(0, docSize.width - archiveWidth)
+        );
+        const nextTop = clamp(
+          currentRect.top + window.scrollY,
+          0,
+          Math.max(0, docSize.height - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
+        );
+        archive.style.left = `${nextLeft}px`;
+        archive.style.top = `${nextTop}px`;
+      } else {
+        const nextLeft = clamp(currentRect.left, 0, Math.max(0, window.innerWidth - archiveWidth));
+        const nextTop = clamp(
+          currentRect.top,
+          0,
+          Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
+        );
+        archive.style.left = `${nextLeft}px`;
+        archive.style.top = `${nextTop}px`;
+      }
+    }
+
+    async function submitArchivePrompt() {
+      if (archivePending || archivePinned) return;
+      const prompt = chatInput.value.trim();
+      if (!prompt) return;
+
+      archivePending = true;
+      chatInput.disabled = true;
+      sendButton.disabled = true;
+      chatInput.value = "";
+
+      promptCopy.style.display = "block";
+      promptCopy.textContent = prompt;
+      answerCopy.style.color = "rgba(226, 232, 240, 0.95)";
+      answerCopy.textContent = "Analyzing your request with page context...";
+
+      const requestPrompt = buildPromptWithConversation(prompt, conversationHistory);
+      try {
+        const result = await requestChatAnswer(requestPrompt, buildPageContext(), []);
+        answerCopy.textContent = result.text;
+        conversationHistory = trimConversationHistory([
+          ...conversationHistory,
+          { user: prompt, assistant: result.text }
+        ]);
+      } catch (error) {
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : "No se pudo obtener respuesta.";
+        answerCopy.style.color = "#fca5a5";
+        answerCopy.textContent = `Error: ${message}`;
+        conversationHistory = trimConversationHistory([
+          ...conversationHistory,
+          { user: prompt, assistant: `Error: ${message}` }
+        ]);
+      } finally {
+        archivePending = false;
+        chatInput.disabled = false;
+        sendButton.disabled = false;
+        if (!archivePinned) chatInput.focus();
+      }
+    }
+
+    pinButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const nextRect = archive.getBoundingClientRect();
+      if (archivePinned) {
+        const nextLeft = clamp(nextRect.left, 0, Math.max(0, window.innerWidth - archiveWidth));
+        const nextTop = clamp(
+          nextRect.top,
+          0,
+          Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
+        );
+        archivePinned = false;
+        archive.style.position = "fixed";
+        archive.style.left = `${nextLeft}px`;
+        archive.style.top = `${nextTop}px`;
+      } else {
+        const nextDocSize = getDocumentSize();
+        const nextLeft = clamp(
+          nextRect.left + window.scrollX,
+          0,
+          Math.max(0, nextDocSize.width - archiveWidth)
+        );
+        const nextTop = clamp(
+          nextRect.top + window.scrollY,
+          0,
+          Math.max(0, nextDocSize.height - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
+        );
+        archivePinned = true;
+        archive.style.position = "absolute";
+        archive.style.left = `${nextLeft}px`;
+        archive.style.top = `${nextTop}px`;
+      }
+      updateArchivePinState();
+      positionArchiveWithinBounds();
+    });
+
+    closeButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      archive.remove();
+    });
+
+    minimizeButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      archiveMinimized = !archiveMinimized;
+      updateArchiveMinimizeState();
+      positionArchiveWithinBounds();
+    });
+
+    chatInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      void submitArchivePrompt();
+    });
+    sendButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void submitArchivePrompt();
+    });
+
+    let activePointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let originLeft = initialLeft;
+    let originTop = initialTop;
+    let hasDragged = false;
+
+    archive.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      if (event.target instanceof Element && event.target.closest("button, input")) return;
+      event.preventDefault();
+      archive.setPointerCapture(event.pointerId);
+      activePointerId = event.pointerId;
+      startX = event.clientX;
+      startY = event.clientY;
+      hasDragged = false;
+      originLeft = parseFloat(archive.style.left) || 0;
+      originTop = parseFloat(archive.style.top) || 0;
+      archive.style.cursor = "grabbing";
+    });
+
+    archive.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== activePointerId) return;
+      const dx = event.clientX - startX;
+      const dy = event.clientY - startY;
+      if (!hasDragged && Math.hypot(dx, dy) > BAR_DRAG_THRESHOLD_PX) {
+        hasDragged = true;
+      }
+      if (!hasDragged) return;
+
+      if (archivePinned) {
+        const nextDocSize = getDocumentSize();
+        const nextLeft = clamp(originLeft + dx, 0, Math.max(0, nextDocSize.width - archiveWidth));
+        const nextTop = clamp(
+          originTop + dy,
+          0,
+          Math.max(0, nextDocSize.height - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
+        );
+        archive.style.left = `${nextLeft}px`;
+        archive.style.top = `${nextTop}px`;
+      } else {
+        const nextLeft = clamp(originLeft + dx, 0, Math.max(0, window.innerWidth - archiveWidth));
+        const nextTop = clamp(
+          originTop + dy,
+          0,
+          Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
+        );
+        archive.style.left = `${nextLeft}px`;
+        archive.style.top = `${nextTop}px`;
+      }
+    });
+
+    archive.addEventListener("pointerup", (event) => {
+      if (event.pointerId !== activePointerId) return;
+      archive.releasePointerCapture(event.pointerId);
+      activePointerId = null;
+      archive.style.cursor = "grab";
+    });
+
+    archive.addEventListener("pointercancel", (event) => {
+      if (event.pointerId !== activePointerId) return;
+      activePointerId = null;
+      archive.style.cursor = "grab";
+    });
+
+    let resizingPointerId = null;
+    let resizeStartX = 0;
+    let resizeOriginWidth = archiveWidth;
+    resizeHandle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      resizeHandle.setPointerCapture(event.pointerId);
+      resizingPointerId = event.pointerId;
+      resizeStartX = event.clientX;
+      resizeOriginWidth = archiveWidth;
+    });
+    resizeHandle.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== resizingPointerId) return;
+      const nextWidth = clamp(resizeOriginWidth + (event.clientX - resizeStartX), BAR_MIN_WIDTH_PX, BAR_MAX_WIDTH_PX);
+      archiveWidth = nextWidth;
+      archive.style.width = `${nextWidth}px`;
+      positionArchiveWithinBounds();
+    });
+    resizeHandle.addEventListener("pointerup", (event) => {
+      if (event.pointerId !== resizingPointerId) return;
+      resizeHandle.releasePointerCapture(event.pointerId);
+      resizingPointerId = null;
+    });
+    resizeHandle.addEventListener("pointercancel", (event) => {
+      if (event.pointerId !== resizingPointerId) return;
+      resizingPointerId = null;
+    });
+
+    updateArchivePinState();
+    updateArchiveMinimizeState();
+  }
+
+  function setPanelContent(
+    text,
+    { muted = false, error = false, chainOfThought = [], promptText = "" } = {}
+  ) {
     const panelContent = getPanelContent();
     if (!panelContent) return;
+
+    const prompt = getPanelPrompt();
+    if (prompt) {
+      const normalizedPrompt = typeof promptText === "string" ? promptText.trim() : "";
+      if (normalizedPrompt) {
+        prompt.style.display = "block";
+        prompt.textContent = normalizedPrompt;
+      } else {
+        prompt.style.display = "none";
+        prompt.textContent = "";
+      }
+    }
 
     const answer = getPanelAnswer();
     if (!answer) {
@@ -1101,6 +1804,41 @@
     renderChainOfThought(chainOfThought, { muted });
 
     if (state.expanded) requestAnimationFrame(resizePanelToContent);
+  }
+
+  function trimConversationHistory(history, maxTurns = 10) {
+    if (!Array.isArray(history)) return [];
+    return history
+      .filter(
+        (turn) =>
+          turn &&
+          typeof turn.user === "string" &&
+          turn.user.trim() &&
+          typeof turn.assistant === "string" &&
+          turn.assistant.trim()
+      )
+      .slice(-maxTurns);
+  }
+
+  function buildPromptWithConversation(prompt, history) {
+    const currentPrompt = typeof prompt === "string" ? prompt.trim() : "";
+    if (!currentPrompt) return "";
+    const turns = trimConversationHistory(history, 8);
+    if (turns.length === 0) return currentPrompt;
+
+    const serializedHistory = turns
+      .map(
+        (turn, index) =>
+          `Turn ${index + 1} user:\n${truncateText(turn.user, 1200)}\n` +
+          `Turn ${index + 1} assistant:\n${truncateText(turn.assistant, 1600)}`
+      )
+      .join("\n\n");
+
+    return (
+      "Conversation context (keep continuity with it):\n" +
+      `${serializedHistory}\n\n` +
+      `Current user message:\n${currentPrompt}`
+    );
   }
 
   function requestChatAnswer(prompt, pageContext, attachments = []) {
@@ -1143,9 +1881,12 @@
     const requestId = ++state.requestId;
     state.pending = true;
     input.disabled = true;
+    input.value = "";
+    hideBottomGradient();
     const pageContext = buildPageContext();
     const attachments = toImageAttachmentPayload();
     const hasImageAttachment = attachments.length > 0;
+    const requestPrompt = buildPromptWithConversation(prompt, state.currentConversation);
     const loadingChain = [
       {
         title: "Reading what you are viewing",
@@ -1170,20 +1911,30 @@
     ];
 
     if (!state.expanded) expandPanel();
+    if (state.panelBodyHidden) {
+      state.panelBodyHidden = false;
+      applyPanelBodyVisibility();
+    }
     setPanelContent(
       hasImageAttachment
         ? "Analyzing your request with page context and screenshot..."
         : "Analyzing your request with page context...",
       {
       muted: true,
-      chainOfThought: loadingChain
+      chainOfThought: loadingChain,
+      promptText: prompt
       }
     );
 
     try {
-      const result = await requestChatAnswer(prompt, pageContext, attachments);
+      const result = await requestChatAnswer(requestPrompt, pageContext, attachments);
       if (requestId !== state.requestId) return;
-      setPanelContent(result.text, { chainOfThought: result.chainOfThought });
+      state.currentTabHasResponse = true;
+      state.currentConversation = trimConversationHistory([
+        ...state.currentConversation,
+        { user: prompt, assistant: result.text }
+      ]);
+      setPanelContent(result.text, { chainOfThought: result.chainOfThought, promptText: prompt });
       if (hasImageAttachment) clearImageAttachment();
     } catch (error) {
       if (requestId !== state.requestId) return;
@@ -1191,7 +1942,16 @@
         error instanceof Error && error.message
           ? error.message
           : "No se pudo obtener respuesta.";
-      setPanelContent(`Error: ${message}`, { error: true, chainOfThought: [] });
+      state.currentTabHasResponse = true;
+      state.currentConversation = trimConversationHistory([
+        ...state.currentConversation,
+        { user: prompt, assistant: `Error: ${message}` }
+      ]);
+      setPanelContent(`Error: ${message}`, {
+        error: true,
+        chainOfThought: [],
+        promptText: prompt
+      });
     } finally {
       if (requestId !== state.requestId) return;
       state.pending = false;
@@ -1206,32 +1966,39 @@
    * ================================================================ */
   function createBar() {
     injectPlaceholderStyle();
-    const gradient = ensureBottomGradient();
+    ensureBottomGradient();
 
     /* ── container (pill bar) ── */
     const bar = document.createElement("div");
     bar.id = BAR_CONTAINER_ID;
 
-    const startLeft = Math.max(0, (window.innerWidth - BAR_WIDTH_PX) / 2);
+    const startWidth = clamp(state.barWidth || BAR_WIDTH_PX, BAR_MIN_WIDTH_PX, BAR_MAX_WIDTH_PX);
+    const startLeft = Math.max(0, (window.innerWidth - startWidth) / 2);
     state.barLeft = startLeft;
     state.barBottom = BAR_BOTTOM_PX;
+    state.barTop = window.scrollY + BAR_BOTTOM_PX;
+    state.barWidth = startWidth;
+    state.pinned = false;
+    state.currentTabHasResponse = false;
+    state.currentConversation = [];
 
     Object.assign(bar.style, {
       position: "fixed",
       bottom: `-${BAR_HEIGHT_PX + 20}px`,  /* starts off-screen */
       left: `${startLeft}px`,
-      width: `${BAR_WIDTH_PX}px`,
-      height: `${BAR_HEIGHT_PX}px`,
+      width: `${startWidth}px`,
+      minHeight: `${BAR_HEIGHT_PX}px`,
       borderRadius: `${BAR_RADIUS_PX}px`,
-      background: BG_COLOR,
+      background: BAR_BG_UNPINNED,
       backdropFilter: BG_BLUR,
       WebkitBackdropFilter: BG_BLUR,
       border: `1px solid ${BORDER_COLOR}`,
       boxShadow: "0 12px 40px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255,255,255,0.04) inset",
       display: "flex",
-      alignItems: "center",
-      gap: "12px",
-      padding: "0 16px",
+      flexDirection: "column",
+      alignItems: "stretch",
+      gap: "10px",
+      padding: "10px 16px",
       zIndex: "2147483647",
       cursor: "grab",
       userSelect: "none",
@@ -1240,6 +2007,16 @@
       opacity: "0",
       fontFamily: "'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif",
       boxSizing: "border-box"
+    });
+
+    const inputRow = document.createElement("div");
+    inputRow.id = BAR_INPUT_ROW_ID;
+    Object.assign(inputRow.style, {
+      display: "flex",
+      alignItems: "center",
+      gap: "12px",
+      width: "100%",
+      minHeight: `${BAR_HEIGHT_PX - 22}px`
     });
 
     /* ── icon ── */
@@ -1327,33 +2104,35 @@
       sendHint.style.background = "rgba(99, 102, 241, 0.25)";
     });
 
-    bar.appendChild(icon);
-    bar.appendChild(attachmentStrip);
-    bar.appendChild(input);
-    bar.appendChild(sendHint);
+    inputRow.appendChild(icon);
+    inputRow.appendChild(attachmentStrip);
+    inputRow.appendChild(input);
+    inputRow.appendChild(sendHint);
+    bar.appendChild(inputRow);
 
     /* ── results panel (hidden) ── */
     const panel = document.createElement("div");
     panel.id = PANEL_ID;
 
     Object.assign(panel.style, {
-      position: "absolute",
-      bottom: `${BAR_HEIGHT_PX + 8}px`,
-      left: "0",
+      position: "relative",
       width: "100%",
       maxHeight: "0",
       overflowX: "hidden",
       overflowY: "auto",
       borderRadius: `${PANEL_RADIUS_PX}px`,
-      background: BG_COLOR,
+      background: PANEL_BG_UNPINNED,
       backdropFilter: BG_BLUR,
       WebkitBackdropFilter: BG_BLUR,
       border: `1px solid ${BORDER_COLOR}`,
-      boxShadow: "0 -8px 32px rgba(0, 0, 0, 0.35)",
-      transition: `max-height ${EXPAND_DURATION_MS}ms ${EASING}, opacity ${EXPAND_DURATION_MS}ms ease`,
+      boxShadow: "0 8px 26px rgba(0, 0, 0, 0.28)",
+      transition:
+        `max-height ${EXPAND_DURATION_MS}ms ${EASING}, opacity ${EXPAND_DURATION_MS}ms ease, ` +
+        `margin-top ${EXPAND_DURATION_MS}ms ${EASING}`,
       opacity: "0",
       boxSizing: "border-box",
-      padding: "0 20px",
+      padding: "0 14px",
+      marginTop: "0",
       color: INPUT_COLOR,
       fontSize: "14px",
       fontFamily: "inherit",
@@ -1364,10 +2143,168 @@
     const panelInner = document.createElement("div");
     panelInner.id = PANEL_CONTENT_ID;
     Object.assign(panelInner.style, {
-      padding: "20px 0",
+      padding: "10px 0 14px",
       display: "flex",
       flexDirection: "column",
       gap: "12px"
+    });
+
+    const panelActions = document.createElement("div");
+    Object.assign(panelActions.style, {
+      display: "flex",
+      justifyContent: "flex-end",
+      alignItems: "center",
+      gap: "6px"
+    });
+
+    const pinButton = document.createElement("button");
+    pinButton.id = PANEL_PIN_BUTTON_ID;
+    pinButton.type = "button";
+    pinButton.title = "Pin response panel";
+    Object.assign(pinButton.style, {
+      width: "24px",
+      height: "24px",
+      borderRadius: "9999px",
+      border: "1px solid rgba(125, 211, 252, 0.72)",
+      background: "rgba(56, 189, 248, 0.45)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "pointer",
+      padding: "0",
+      transition: "all 150ms ease",
+      opacity: "0.9"
+    });
+    pinButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    pinButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      togglePinnedBar();
+    });
+    pinButton.addEventListener("pointerenter", () => {
+      pinButton.style.opacity = "1";
+    });
+    pinButton.addEventListener("pointerleave", () => {
+      updatePinButtonVisualState();
+    });
+
+    const pinIcon = document.createElement("img");
+    pinIcon.src = PIN_ICON_SRC;
+    pinIcon.alt = "Pin response";
+    Object.assign(pinIcon.style, {
+      width: "12px",
+      height: "12px",
+      objectFit: "contain",
+      pointerEvents: "none"
+    });
+    pinButton.appendChild(pinIcon);
+    panelActions.appendChild(pinButton);
+
+    const closeButton = document.createElement("button");
+    closeButton.id = PANEL_CLOSE_BUTTON_ID;
+    closeButton.type = "button";
+    closeButton.title = "Close tab";
+    closeButton.textContent = "x";
+    Object.assign(closeButton.style, {
+      width: "24px",
+      height: "24px",
+      borderRadius: "9999px",
+      border: "1px solid rgba(252, 165, 165, 0.95)",
+      background: "rgba(248, 113, 113, 0.86)",
+      color: "#450a0a",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "pointer",
+      padding: "0",
+      fontSize: "12px",
+      fontWeight: "700",
+      lineHeight: "1",
+      opacity: "0.95",
+      transition: "opacity 150ms ease, transform 150ms ease"
+    });
+    closeButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    closeButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      dismissBar();
+    });
+    closeButton.addEventListener("pointerenter", () => {
+      closeButton.style.opacity = "1";
+      closeButton.style.transform = "scale(1.03)";
+    });
+    closeButton.addEventListener("pointerleave", () => {
+      closeButton.style.opacity = "0.95";
+      closeButton.style.transform = "scale(1)";
+    });
+    panelActions.appendChild(closeButton);
+
+    const minimizeButton = document.createElement("button");
+    minimizeButton.id = PANEL_MINIMIZE_BUTTON_ID;
+    minimizeButton.type = "button";
+    minimizeButton.title = "Make panel smaller";
+    minimizeButton.textContent = "-";
+    Object.assign(minimizeButton.style, {
+      width: "24px",
+      height: "24px",
+      borderRadius: "9999px",
+      border: "1px solid rgba(253, 224, 71, 0.92)",
+      background: "rgba(250, 204, 21, 0.74)",
+      color: "#713f12",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "pointer",
+      padding: "0",
+      fontSize: "13px",
+      fontWeight: "700",
+      lineHeight: "1",
+      opacity: "0.96",
+      transition: "all 150ms ease"
+    });
+    minimizeButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    minimizeButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      togglePanelCompact();
+    });
+    minimizeButton.addEventListener("pointerenter", () => {
+      minimizeButton.style.opacity = "1";
+    });
+    minimizeButton.addEventListener("pointerleave", () => {
+      updateMinimizeButtonVisualState();
+    });
+    panelActions.appendChild(minimizeButton);
+
+    const resizeHandle = document.createElement("div");
+    resizeHandle.title = "Resize tab";
+    Object.assign(resizeHandle.style, {
+      width: "11px",
+      height: "11px",
+      borderRight: "2px solid rgba(148, 163, 184, 0.9)",
+      borderBottom: "2px solid rgba(148, 163, 184, 0.9)",
+      borderRadius: "2px",
+      cursor: "nwse-resize",
+      marginLeft: "4px",
+      opacity: "0.85"
+    });
+    resizeHandle.addEventListener("pointerdown", (event) => event.stopPropagation());
+    panelActions.appendChild(resizeHandle);
+
+    const prompt = document.createElement("div");
+    prompt.id = PANEL_PROMPT_ID;
+    Object.assign(prompt.style, {
+      display: "none",
+      border: "1px solid rgba(147, 197, 253, 0.38)",
+      borderRadius: "12px",
+      background: "rgba(30, 58, 138, 0.24)",
+      color: "rgba(219, 234, 254, 0.95)",
+      padding: "10px 12px",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word",
+      fontSize: "13px",
+      lineHeight: "1.5",
+      fontWeight: "500"
     });
 
     const answer = document.createElement("div");
@@ -1394,11 +2331,16 @@
       gap: "8px"
     });
 
+    panelInner.appendChild(panelActions);
+    panelInner.appendChild(prompt);
     panelInner.appendChild(answer);
     panelInner.appendChild(chainWrap);
     panel.appendChild(panelInner);
 
     bar.appendChild(panel);
+    updateActivePinnedVisualState();
+    updatePinButtonVisualState();
+    updateMinimizeButtonVisualState();
 
     /* ================================================================
      *  DRAG  (reposition bar)
@@ -1408,6 +2350,7 @@
     let pStartY = 0;
     let originLeft = 0;
     let originBottom = 0;
+    let originTop = 0;
     let hasDragged = false;
 
     bar.addEventListener("pointerdown", (e) => {
@@ -1420,7 +2363,11 @@
       hasDragged = false;
 
       originLeft = parseFloat(bar.style.left) || state.barLeft;
-      originBottom = parseFloat(bar.style.bottom) || state.barBottom;
+      if (state.pinned) {
+        originTop = parseFloat(bar.style.top) || state.barTop;
+      } else {
+        originBottom = parseFloat(bar.style.bottom) || state.barBottom;
+      }
 
       bar.style.cursor = "grabbing";
       bar.style.transition = "none"; /* disable transition during drag */
@@ -1434,16 +2381,29 @@
 
       if (!hasDragged && Math.hypot(dx, dy) > BAR_DRAG_THRESHOLD_PX) {
         hasDragged = true;
+        hideBottomGradient();
       }
       if (!hasDragged) return;
 
-      const newLeft = Math.max(0, Math.min(originLeft + dx, window.innerWidth - BAR_WIDTH_PX));
-      const newBottom = Math.max(0, Math.min(originBottom - dy, window.innerHeight - BAR_HEIGHT_PX - 20));
-
-      bar.style.left = `${newLeft}px`;
-      bar.style.bottom = `${newBottom}px`;
-      state.barLeft = newLeft;
-      state.barBottom = newBottom;
+      if (state.pinned) {
+        const docSize = getDocumentSize();
+        const maxLeft = Math.max(0, docSize.width - state.barWidth);
+        const maxTop = Math.max(0, docSize.height - bar.offsetHeight - 12);
+        const newLeft = clamp(originLeft + dx, 0, maxLeft);
+        const newTop = clamp(originTop + dy, 0, maxTop);
+        bar.style.left = `${newLeft}px`;
+        bar.style.top = `${newTop}px`;
+        state.barLeft = newLeft;
+        state.barTop = newTop;
+      } else {
+        const newLeft = Math.max(0, Math.min(originLeft + dx, window.innerWidth - state.barWidth));
+        const maxBottom = Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, bar.offsetHeight) - 20);
+        const newBottom = Math.max(0, Math.min(originBottom - dy, maxBottom));
+        bar.style.left = `${newLeft}px`;
+        bar.style.bottom = `${newBottom}px`;
+        state.barLeft = newLeft;
+        state.barBottom = newBottom;
+      }
       if (state.expanded) resizePanelToContent();
     });
 
@@ -1453,14 +2413,75 @@
       activePointerId = null;
       bar.style.cursor = "grab";
       /* restore transitions */
-      bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
+      if (state.pinned) {
+        bar.style.transition = `opacity ${SLIDE_DURATION_MS}ms ease`;
+      } else {
+        bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
+      }
     });
 
     bar.addEventListener("pointercancel", (e) => {
       if (e.pointerId !== activePointerId) return;
       activePointerId = null;
       bar.style.cursor = "grab";
-      bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
+      if (state.pinned) {
+        bar.style.transition = `opacity ${SLIDE_DURATION_MS}ms ease`;
+      } else {
+        bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
+      }
+    });
+
+    let resizingPointerId = null;
+    let resizeStartX = 0;
+    let resizeOriginWidth = state.barWidth;
+
+    resizeHandle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      resizeHandle.setPointerCapture(event.pointerId);
+      resizingPointerId = event.pointerId;
+      resizeStartX = event.clientX;
+      resizeOriginWidth = state.barWidth;
+      hideBottomGradient();
+    });
+
+    resizeHandle.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== resizingPointerId) return;
+      const nextWidth = clamp(
+        resizeOriginWidth + (event.clientX - resizeStartX),
+        BAR_MIN_WIDTH_PX,
+        BAR_MAX_WIDTH_PX
+      );
+      state.barWidth = nextWidth;
+      bar.style.width = `${nextWidth}px`;
+
+      if (state.pinned) {
+        const docSize = getDocumentSize();
+        const maxLeft = Math.max(0, docSize.width - state.barWidth);
+        if (state.barLeft > maxLeft) {
+          state.barLeft = maxLeft;
+          bar.style.left = `${maxLeft}px`;
+        }
+      } else {
+        const maxLeft = Math.max(0, window.innerWidth - state.barWidth);
+        if (state.barLeft > maxLeft) {
+          state.barLeft = maxLeft;
+          bar.style.left = `${maxLeft}px`;
+        }
+      }
+
+      if (state.expanded) resizePanelToContent();
+    });
+
+    resizeHandle.addEventListener("pointerup", (event) => {
+      if (event.pointerId !== resizingPointerId) return;
+      resizeHandle.releasePointerCapture(event.pointerId);
+      resizingPointerId = null;
+    });
+
+    resizeHandle.addEventListener("pointercancel", (event) => {
+      if (event.pointerId !== resizingPointerId) return;
+      resizingPointerId = null;
     });
 
     /* ── mount ── */
@@ -1470,7 +2491,7 @@
     /* slide in */
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        gradient.style.opacity = "1";
+        showBottomGradient();
         bar.style.bottom = `${BAR_BOTTOM_PX}px`;
         bar.style.opacity = "1";
       });
@@ -1500,11 +2521,24 @@
     state.onResize = () => {
       const b = getBar();
       if (!b) return;
-      /* re-centre if needed */
-      const maxLeft = Math.max(0, window.innerWidth - BAR_WIDTH_PX);
-      if (state.barLeft > maxLeft) {
-        state.barLeft = maxLeft;
-        b.style.left = `${maxLeft}px`;
+      if (state.pinned) {
+        const docSize = getDocumentSize();
+        const maxLeft = Math.max(0, docSize.width - state.barWidth);
+        const maxTop = Math.max(0, docSize.height - b.offsetHeight - 12);
+        if (state.barLeft > maxLeft) {
+          state.barLeft = maxLeft;
+          b.style.left = `${maxLeft}px`;
+        }
+        if (state.barTop > maxTop) {
+          state.barTop = maxTop;
+          b.style.top = `${maxTop}px`;
+        }
+      } else {
+        const maxLeft = Math.max(0, window.innerWidth - state.barWidth);
+        if (state.barLeft > maxLeft) {
+          state.barLeft = maxLeft;
+          b.style.left = `${maxLeft}px`;
+        }
       }
       if (state.expanded) resizePanelToContent();
     };
@@ -1521,8 +2555,11 @@
     if (!panel) return;
 
     state.expanded = true;
+    state.panelBodyHidden = false;
     panel.style.opacity = "1";
-    panel.style.padding = "0 20px";
+    panel.style.marginTop = "2px";
+    applyPanelBodyVisibility();
+    updateMinimizeButtonVisualState();
     requestAnimationFrame(resizePanelToContent);
   }
 
@@ -1531,8 +2568,11 @@
     if (!panel) return;
 
     state.expanded = false;
+    state.panelBodyHidden = false;
     panel.style.maxHeight = "0";
     panel.style.opacity = "0";
+    panel.style.marginTop = "0";
+    updateMinimizeButtonVisualState();
   }
 
   /* ================================================================
@@ -1552,11 +2592,17 @@
     if (state.expanded) collapsePanel();
 
     /* restore transition in case it was removed during drag */
-    bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
+    if (state.pinned) {
+      bar.style.transition = `opacity ${SLIDE_DURATION_MS}ms ease`;
+    } else {
+      bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
+    }
 
     requestAnimationFrame(() => {
       if (gradient) gradient.style.opacity = "0";
-      bar.style.bottom = `-${BAR_HEIGHT_PX + 20}px`;
+      if (!state.pinned) {
+        bar.style.bottom = `-${BAR_HEIGHT_PX + 20}px`;
+      }
       bar.style.opacity = "0";
     });
 
@@ -1592,32 +2638,62 @@
 
     state.visible = false;
     state.expanded = false;
+    state.panelBodyHidden = false;
     state.pending = false;
+    state.pinned = false;
+    state.currentTabHasResponse = false;
+    state.currentConversation = [];
+    state.barTop = 0;
   }
 
   /* ================================================================
    *  TOGGLE ENTRY POINT
    * ================================================================ */
   function activateToolbox() {
-    createFloatingIcon();
+    finishScreenCaptureOverlay();
+    removeFloatingUI();
+    if (state.visible) {
+      const input = getInput();
+      if (input) {
+        input.focus();
+        input.select();
+      }
+      return;
+    }
+    createBar();
   }
 
   function deactivateToolbox() {
     finishScreenCaptureOverlay();
     if (state.visible) {
-      dismissBar({ removeFloating: true });
+      dismissBar();
       return;
     }
-    clearImageAttachment();
+  }
+
+  function openNewToolboxTab() {
+    finishScreenCaptureOverlay();
     removeFloatingUI();
+
+    const hasActiveTab = state.visible || !!getBar();
+    if (!hasActiveTab) {
+      activateToolbox();
+      return;
+    }
+
+    if (state.currentTabHasResponse) {
+      createArchivedResponseTab(state.currentConversation);
+    }
+
+    state.requestId += 1;
+    state.pending = false;
+    clearImageAttachment();
+    removeBarUI();
+    activateToolbox();
   }
 
   function toggleToolbox() {
-    if (getFloatingIcon()) {
-      deactivateToolbox();
-    } else {
-      activateToolbox();
-    }
+    openNewToolboxTab();
   }
 
   /* ── message listener (unchanged contract) ── */

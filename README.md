@@ -63,16 +63,16 @@ curl http://127.0.0.1:8787/health
 
 1. Abre una web normal (`http`/`https`).
 2. Haz click en el icono de la extensión o usa `Ctrl+Shift+Space`.
-3. Aparece el icono flotante en la página.
-4. Pulsa el nodo `BOTTOM` para abrir el chat.
-5. Escribe un prompt y pulsa Enter (o botón de envío).
-6. La respuesta aparece en el panel superior de la barra.
-
-Captura de pantalla parcial:
-- Pulsa el nodo `LEFT` del icono flotante.
-- Arrastra para seleccionar un área visible de la pantalla.
-- La imagen se adjunta automáticamente al chat.
-- Puedes quitar el adjunto con `x` antes de enviar.
+3. Se abre directamente la barra de chat en la parte inferior.
+4. Escribe un prompt y pulsa Enter (o botón de envío).
+5. El input inferior se limpia automáticamente y tu pregunta aparece arriba de la respuesta.
+6. La barra se expande verticalmente para mostrar la respuesta dentro del mismo componente.
+7. En la esquina superior derecha de la respuesta tienes 3 controles: pin azul (fijar), cerrar rojo y reducir amarillo.
+8. Si pulsas otra vez `Ctrl+Shift+Space`, se crea una nueva barra; la anterior se conserva solo si ya tenía respuesta.
+9. Si la barra anterior estaba vacía (sin respuesta), se cierra automáticamente al crear la nueva.
+10. Al pinear una tab, se oculta su input de chat; al quitar el pin, el input vuelve a mostrarse.
+11. Cada tab mantiene su propio contexto de conversación para follow-ups.
+12. Puedes redimensionar tabs dentro de límites arrastrando el handle de resize.
 
 La UI de respuesta ahora incluye:
 - Espacio de respuesta que se expande automáticamente cuando el contenido es largo.

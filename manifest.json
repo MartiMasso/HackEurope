@@ -52,7 +52,8 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "assets/icon.png"
+        "assets/icon.png",
+        "assets/pin.png"
       ],
       "matches": [
         "<all_urls>"
