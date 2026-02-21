@@ -11,11 +11,15 @@
   const PANEL_PROMPT_ID = "__toolbox_panel_prompt__";
   const PANEL_ANSWER_ID = "__toolbox_panel_answer__";
   const PANEL_COT_ID = "__toolbox_panel_chain_of_thought__";
+  const PANEL_AGENT_BUTTON_ID = "__toolbox_panel_agent_button__";
   const PANEL_PIN_BUTTON_ID = "__toolbox_panel_pin_button__";
   const PANEL_CLOSE_BUTTON_ID = "__toolbox_panel_close_button__";
   const PANEL_MINIMIZE_BUTTON_ID = "__toolbox_panel_minimize_button__";
   const ARCHIVE_TAB_CLASS = "__toolbox_archive_tab__";
   const BAR_ATTACHMENTS_ID = "__toolbox_bar_attachments__";
+  const AGENT_OVERLAY_ID = "__toolbox_agent_overlay__";
+  const AGENT_CURSOR_ID = "__toolbox_agent_cursor__";
+  const AGENT_STATUS_ID = "__toolbox_agent_status__";
   const FLOATING_ICON_ID = "__toolbox_icon__";
   const FLOATING_NODE_ID_PREFIX = "__toolbox_node__";
   const FLOATING_POPUP_ID = "__toolbox_template_popup__";
@@ -23,6 +27,7 @@
   const SCREENSHOT_SELECTION_ID = "__toolbox_screen_capture_selection__";
   const TOGGLE_MESSAGE_TYPE = "TOGGLE_TOOLBOX_BUBBLE";
   const CHAT_MESSAGE_TYPE = "TOOLBOX_CHAT_REQUEST";
+  const AGENT_MESSAGE_TYPE = "TOOLBOX_AGENT_REQUEST";
   const CAPTURE_MESSAGE_TYPE = "TOOLBOX_CAPTURE_VISIBLE_TAB";
   const ICON_SRC = chrome.runtime.getURL("assets/icon.png");
   const PIN_ICON_SRC = chrome.runtime.getURL("assets/pin.png");
@@ -50,6 +55,11 @@
   const PANEL_MAX_HEIGHT_RATIO = 0.78;
   const PANEL_RADIUS_PX = 18;
   const BAR_DRAG_THRESHOLD_PX = 5;
+  const AGENT_MAX_STEPS = 8;
+  const AGENT_MAX_HISTORY = 10;
+  const RESIZE_HIT_AREA_PX = 8;
+  const BAR_MIN_TOTAL_HEIGHT_PX = 72;
+  const BAR_MAX_TOTAL_HEIGHT_PX = 980;
   const PAGE_CONTEXT_MAX_CHARS = 12000;
   const PAGE_SELECTION_MAX_CHARS = 2000;
   const PAGE_ACTIVE_ELEMENT_MAX_CHARS = 2000;
@@ -84,6 +94,7 @@
     barLeft: 0,        // will be centred on create
     barTop: 0,
     barWidth: BAR_WIDTH_PX,
+    barHeight: null,
     pinned: false,
     currentTabHasResponse: false,
     currentConversation: [],
@@ -96,6 +107,9 @@
     floatingPopupCloseTimer: null,
     floatingOnResize: null,
     imageAttachment: null,
+    agentModeEnabled: false,
+    agentRunning: false,
+    agentStopRequested: false,
     screenCaptureCleanup: null,
     screenCaptureInProgress: false
   };
@@ -113,6 +127,41 @@
   }
   function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
+  }
+  function getResizeDirectionForRect(clientX, clientY, rect) {
+    if (!rect) return "";
+    const nearLeft = clientX - rect.left <= RESIZE_HIT_AREA_PX;
+    const nearRight = rect.right - clientX <= RESIZE_HIT_AREA_PX;
+    const nearTop = clientY - rect.top <= RESIZE_HIT_AREA_PX;
+    const nearBottom = rect.bottom - clientY <= RESIZE_HIT_AREA_PX;
+
+    if (nearTop && nearLeft) return "nw";
+    if (nearTop && nearRight) return "ne";
+    if (nearBottom && nearLeft) return "sw";
+    if (nearBottom && nearRight) return "se";
+    if (nearTop) return "n";
+    if (nearBottom) return "s";
+    if (nearLeft) return "w";
+    if (nearRight) return "e";
+    return "";
+  }
+  function getResizeCursor(direction) {
+    switch (direction) {
+      case "n":
+      case "s":
+        return "ns-resize";
+      case "e":
+      case "w":
+        return "ew-resize";
+      case "ne":
+      case "sw":
+        return "nesw-resize";
+      case "nw":
+      case "se":
+        return "nwse-resize";
+      default:
+        return "grab";
+    }
   }
   function getBar() {
     return getEl(BAR_CONTAINER_ID);
@@ -138,6 +187,9 @@
   function getPanelChainOfThought() {
     return getEl(PANEL_COT_ID);
   }
+  function getPanelAgentButton() {
+    return getEl(PANEL_AGENT_BUTTON_ID);
+  }
   function getPanelPinButton() {
     return getEl(PANEL_PIN_BUTTON_ID);
   }
@@ -146,6 +198,15 @@
   }
   function getAttachmentStrip() {
     return getEl(BAR_ATTACHMENTS_ID);
+  }
+  function getAgentOverlay() {
+    return getEl(AGENT_OVERLAY_ID);
+  }
+  function getAgentCursor() {
+    return getEl(AGENT_CURSOR_ID);
+  }
+  function getAgentStatus() {
+    return getEl(AGENT_STATUS_ID);
   }
   function getBottomGradient() {
     return getEl(BAR_GRADIENT_ID);
@@ -610,6 +671,566 @@
     renderAttachmentStrip();
   }
 
+  function sleep(ms) {
+    return new Promise((resolve) => {
+      setTimeout(resolve, Math.max(0, Math.floor(ms)));
+    });
+  }
+
+  function escapeCssValue(value) {
+    if (typeof value !== "string") return "";
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(value);
+    }
+    return value.replace(/["\\]/g, "\\$&");
+  }
+
+  function buildElementSelector(element) {
+    if (!(element instanceof Element)) return "";
+    const tag = element.tagName.toLowerCase();
+
+    if (element.id) {
+      return `#${escapeCssValue(element.id)}`;
+    }
+
+    const testId = element.getAttribute("data-testid");
+    if (testId && testId.length < 120) {
+      return `${tag}[data-testid="${escapeCssValue(testId)}"]`;
+    }
+
+    const ariaLabel = element.getAttribute("aria-label");
+    if (ariaLabel && ariaLabel.length < 120) {
+      return `${tag}[aria-label="${escapeCssValue(ariaLabel)}"]`;
+    }
+
+    const name = element.getAttribute("name");
+    if (name && name.length < 120) {
+      return `${tag}[name="${escapeCssValue(name)}"]`;
+    }
+
+    const parts = [];
+    let current = element;
+    for (let depth = 0; depth < 5; depth += 1) {
+      if (!current || !(current instanceof Element)) break;
+      const currentTag = current.tagName.toLowerCase();
+      let segment = currentTag;
+      if (current.id) {
+        segment += `#${escapeCssValue(current.id)}`;
+        parts.unshift(segment);
+        break;
+      }
+      const parent = current.parentElement;
+      if (parent) {
+        const sameTagSiblings = Array.from(parent.children).filter(
+          (child) => child.tagName === current.tagName
+        );
+        if (sameTagSiblings.length > 1) {
+          const index = sameTagSiblings.indexOf(current) + 1;
+          segment += `:nth-of-type(${index})`;
+        }
+      }
+      parts.unshift(segment);
+      current = parent;
+      if (!current || current === document.body) break;
+    }
+
+    return parts.join(" > ");
+  }
+
+  function collectActionableElements() {
+    const selector =
+      'a[href],button,input:not([type="hidden"]),textarea,select,[role="button"],[role="link"],[contenteditable="true"]';
+    const nodes = Array.from(document.querySelectorAll(selector));
+    const elements = [];
+    const seenSelectors = new Set();
+
+    for (const element of nodes) {
+      if (!(element instanceof HTMLElement)) continue;
+      if (!isElementVisibleInViewport(element)) continue;
+
+      const tag = element.tagName.toLowerCase();
+      const selectorText = buildElementSelector(element);
+      if (!selectorText || seenSelectors.has(selectorText)) continue;
+      seenSelectors.add(selectorText);
+
+      const rect = element.getBoundingClientRect();
+      const text = truncateText(
+        normalizeText(
+          element.getAttribute("aria-label") ||
+            element.getAttribute("title") ||
+            element.innerText ||
+            element.textContent ||
+            ""
+        ),
+        110
+      );
+      const placeholder = truncateText(
+        normalizeText(element.getAttribute("placeholder") || ""),
+        80
+      );
+      const type = truncateText(normalizeText(element.getAttribute("type") || ""), 40);
+      const role = truncateText(normalizeText(element.getAttribute("role") || ""), 40);
+
+      elements.push({
+        id: `el_${elements.length + 1}`,
+        tag,
+        selector: selectorText,
+        text,
+        placeholder,
+        type,
+        role,
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2)
+      });
+
+      if (elements.length >= 28) break;
+    }
+
+    return elements;
+  }
+
+  function requestAgentStep(goal, pageContext, actionableElements, history) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          type: AGENT_MESSAGE_TYPE,
+          goal,
+          pageContext,
+          actionableElements,
+          history
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(
+              new Error("No se pudo contactar con Agent Mode. Recarga la extensión e inténtalo.")
+            );
+            return;
+          }
+          if (!response || response.ok !== true || !response.action) {
+            const errorMessage =
+              response && typeof response.error === "string"
+                ? response.error
+                : "El backend de agente devolvió una respuesta inválida.";
+            reject(new Error(errorMessage));
+            return;
+          }
+          resolve(response);
+        }
+      );
+    });
+  }
+
+  function ensureAgentOverlay() {
+    let overlay = getAgentOverlay();
+    if (overlay) return overlay;
+
+    overlay = document.createElement("div");
+    overlay.id = AGENT_OVERLAY_ID;
+    Object.assign(overlay.style, {
+      position: "fixed",
+      inset: "0",
+      pointerEvents: "none",
+      zIndex: "2147483647"
+    });
+
+    const cursor = document.createElement("div");
+    cursor.id = AGENT_CURSOR_ID;
+    Object.assign(cursor.style, {
+      position: "fixed",
+      width: "16px",
+      height: "16px",
+      borderRadius: "9999px",
+      border: "2px solid rgba(56, 189, 248, 0.95)",
+      background: "rgba(14, 116, 144, 0.35)",
+      boxShadow: "0 0 0 10px rgba(56, 189, 248, 0.12)",
+      left: "0",
+      top: "0",
+      transform: "translate(-9999px, -9999px)",
+      transition: "transform 260ms ease"
+    });
+
+    const status = document.createElement("div");
+    status.id = AGENT_STATUS_ID;
+    Object.assign(status.style, {
+      position: "fixed",
+      top: "14px",
+      right: "14px",
+      padding: "8px 12px",
+      borderRadius: "10px",
+      background: "rgba(15, 23, 42, 0.92)",
+      border: "1px solid rgba(125, 211, 252, 0.45)",
+      color: "#e0f2fe",
+      fontFamily: "Arial, sans-serif",
+      fontSize: "12px",
+      letterSpacing: "0.2px",
+      maxWidth: "320px"
+    });
+    status.textContent = "Agent mode running...";
+
+    overlay.appendChild(cursor);
+    overlay.appendChild(status);
+    (document.body || document.documentElement).appendChild(overlay);
+    return overlay;
+  }
+
+  function removeAgentOverlay() {
+    const overlay = getAgentOverlay();
+    if (overlay) overlay.remove();
+  }
+
+  function setAgentStatus(text) {
+    ensureAgentOverlay();
+    const status = getAgentStatus();
+    if (status) {
+      status.textContent = text;
+    }
+  }
+
+  async function moveAgentCursor(x, y) {
+    ensureAgentOverlay();
+    const cursor = getAgentCursor();
+    if (!cursor) return;
+    const clampedX = clamp(Math.round(x), 8, Math.max(8, window.innerWidth - 8));
+    const clampedY = clamp(Math.round(y), 8, Math.max(8, window.innerHeight - 8));
+    cursor.style.transform = `translate(${clampedX - 8}px, ${clampedY - 8}px)`;
+    await sleep(280);
+  }
+
+  function flashElement(element) {
+    if (!(element instanceof HTMLElement)) return;
+    const previousOutline = element.style.outline;
+    const previousOutlineOffset = element.style.outlineOffset;
+    const previousTransition = element.style.transition;
+
+    element.style.outline = "2px solid rgba(56, 189, 248, 0.92)";
+    element.style.outlineOffset = "2px";
+    element.style.transition = "outline-color 180ms ease";
+    setTimeout(() => {
+      element.style.outline = previousOutline;
+      element.style.outlineOffset = previousOutlineOffset;
+      element.style.transition = previousTransition;
+    }, 700);
+  }
+
+  function resolveActionableElement(elementId, actionableElements) {
+    if (!elementId || !Array.isArray(actionableElements)) return null;
+    const entry = actionableElements.find((item) => item.id === elementId);
+    if (!entry || typeof entry.selector !== "string") return null;
+    try {
+      const element = document.querySelector(entry.selector);
+      return element instanceof HTMLElement ? { element, entry } : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async function typeTextLikeHuman(element, text, { clear = true } = {}) {
+    const value = typeof text === "string" ? text : "";
+    const normalized = value.slice(0, 280);
+
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      const prototype = Object.getPrototypeOf(element);
+      const valueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+      const setElementValue = (nextValue) => {
+        if (typeof valueSetter === "function") {
+          valueSetter.call(element, nextValue);
+        } else {
+          element.value = nextValue;
+        }
+      };
+
+      element.focus();
+      if (clear) {
+        setElementValue("");
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      for (const char of normalized) {
+        setElementValue(`${element.value}${char}`);
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        await sleep(24);
+      }
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+
+    if (element.isContentEditable) {
+      element.focus();
+      if (clear) {
+        element.textContent = "";
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      for (const char of normalized) {
+        element.textContent = `${element.textContent || ""}${char}`;
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        await sleep(24);
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  async function executeAgentAction(action, actionableElements) {
+    if (!action || typeof action.type !== "string") {
+      return { ok: false, summary: "Invalid agent action." };
+    }
+
+    const type = action.type;
+
+    if (type === "scroll") {
+      const direction = action.direction === "up" ? "up" : "down";
+      const amount = clamp(Number(action.amount) || 520, 120, 1400);
+      await moveAgentCursor(window.innerWidth - 28, Math.floor(window.innerHeight * 0.45));
+      window.scrollBy({
+        top: direction === "up" ? -amount : amount,
+        behavior: "smooth"
+      });
+      await sleep(700);
+      return { ok: true, summary: `Scrolled ${direction}.` };
+    }
+
+    if (type === "click_element") {
+      const resolved = resolveActionableElement(action.elementId, actionableElements);
+      if (!resolved) {
+        return { ok: false, summary: "Target element not found for click." };
+      }
+      const { element } = resolved;
+      element.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+      await sleep(320);
+      const rect = element.getBoundingClientRect();
+      await moveAgentCursor(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      flashElement(element);
+      element.click();
+      await sleep(520);
+      return { ok: true, summary: "Clicked target element." };
+    }
+
+    if (type === "type_in_element") {
+      const resolved = resolveActionableElement(action.elementId, actionableElements);
+      if (!resolved) {
+        return { ok: false, summary: "Target element not found for typing." };
+      }
+      const { element } = resolved;
+      element.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+      await sleep(300);
+      const rect = element.getBoundingClientRect();
+      await moveAgentCursor(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      flashElement(element);
+      const typed = await typeTextLikeHuman(element, action.text || "", {
+        clear: action.clear !== false
+      });
+      if (!typed) {
+        return { ok: false, summary: "Could not type in the target element." };
+      }
+      if (action.submit === true) {
+        element.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true })
+        );
+        element.dispatchEvent(
+          new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true })
+        );
+      }
+      await sleep(300);
+      return { ok: true, summary: "Typed into target element." };
+    }
+
+    if (type === "wait") {
+      const ms = clamp(Number(action.ms) || 700, 120, 3000);
+      await sleep(ms);
+      return { ok: true, summary: `Waited ${ms}ms.` };
+    }
+
+    if (type === "finish") {
+      return { ok: true, summary: "Agent marked task as finished.", done: true };
+    }
+
+    return { ok: false, summary: `Unsupported action: ${type}` };
+  }
+
+  function trimAgentLogs(logs, entry) {
+    logs.push(entry);
+    if (logs.length > AGENT_MAX_HISTORY) {
+      logs.splice(0, logs.length - AGENT_MAX_HISTORY);
+    }
+  }
+
+  function buildAgentChainFromHistory(history) {
+    if (!Array.isArray(history) || history.length === 0) return [];
+    return history.slice(-4).map((item, index) => ({
+      title: `Agent update ${index + 1}`,
+      items: [item]
+    }));
+  }
+
+  function updateAgentButtonVisualState() {
+    const button = getPanelAgentButton();
+    if (!button) return;
+
+    const active = state.agentModeEnabled;
+    button.title = active ? "Disable agent mode" : "Enable agent mode";
+    button.style.background = active ? "rgba(45, 212, 191, 0.68)" : "rgba(45, 212, 191, 0.46)";
+    button.style.borderColor = active
+      ? "rgba(153, 246, 228, 0.92)"
+      : "rgba(153, 246, 228, 0.72)";
+    button.style.color = active ? "#042f2e" : "#083344";
+    button.style.opacity = state.pending || state.agentRunning ? "0.6" : "0.95";
+    button.style.transform = active ? "scale(1.03)" : "scale(1)";
+  }
+
+  function setAgentModeEnabled(enabled) {
+    state.agentModeEnabled = Boolean(enabled);
+    const input = getInput();
+    if (input) {
+      input.placeholder = state.agentModeEnabled
+        ? "Agent mode: describe the task to execute..."
+        : "Ask anything…";
+    }
+    if (!state.agentModeEnabled && !state.agentRunning) {
+      removeAgentOverlay();
+    }
+    updateAgentButtonVisualState();
+  }
+
+  async function runAgentTask(goal) {
+    const input = getInput();
+    if (!input || state.pending || state.agentRunning) return;
+
+    const requestId = ++state.requestId;
+    state.pending = true;
+    state.agentRunning = true;
+    state.agentStopRequested = false;
+    input.disabled = true;
+    input.value = "";
+    hideBottomGradient();
+    if (state.imageAttachment) {
+      clearImageAttachment();
+    }
+
+    if (!state.expanded) expandPanel();
+    if (state.panelBodyHidden) {
+      state.panelBodyHidden = false;
+      applyPanelBodyVisibility();
+    }
+    updateAgentButtonVisualState();
+
+    const logs = [];
+    const history = [];
+    let finalMessage = "";
+    setPanelContent("Agent mode started. Planning actions on this webpage...", {
+      muted: true,
+      chainOfThought: [],
+      promptText: goal
+    });
+    setAgentStatus("Agent: planning first step...");
+
+    try {
+      for (let step = 1; step <= AGENT_MAX_STEPS; step += 1) {
+        if (state.agentStopRequested || requestId !== state.requestId) {
+          throw new Error("Agent execution stopped.");
+        }
+
+        const pageContext = buildPageContext();
+        const actionableElements = collectActionableElements();
+        const historyPayload = history.slice(-6).map((item) => ({
+          step: item.step,
+          action: item.action,
+          result: item.result
+        }));
+
+        const agentResponse = await requestAgentStep(
+          goal,
+          pageContext,
+          actionableElements,
+          historyPayload
+        );
+
+        const reasoning =
+          typeof agentResponse.reasoning === "string" ? agentResponse.reasoning.trim() : "";
+        if (reasoning) {
+          trimAgentLogs(logs, `Step ${step} plan: ${reasoning}`);
+        }
+
+        const action = agentResponse.action;
+        const actionType = typeof action?.type === "string" ? action.type : "unknown";
+        setAgentStatus(`Agent step ${step}/${AGENT_MAX_STEPS}: ${actionType}`);
+
+        if (actionType === "finish") {
+          const finishMessage =
+            typeof agentResponse.message === "string" && agentResponse.message.trim()
+              ? agentResponse.message.trim()
+              : "Task completed.";
+          trimAgentLogs(logs, `Done: ${finishMessage}`);
+          finalMessage = finishMessage;
+          setPanelContent(finishMessage, {
+            chainOfThought: buildAgentChainFromHistory(logs),
+            promptText: goal
+          });
+          state.currentTabHasResponse = true;
+          state.currentConversation = trimConversationHistory([
+            ...state.currentConversation,
+            { user: goal, assistant: finishMessage }
+          ]);
+          return;
+        }
+
+        const execution = await executeAgentAction(action, actionableElements);
+        history.push({
+          step,
+          action: actionType,
+          result: execution.summary
+        });
+        trimAgentLogs(
+          logs,
+          execution.ok
+            ? `Step ${step} executed: ${execution.summary}`
+            : `Step ${step} warning: ${execution.summary}`
+        );
+
+        finalMessage = logs.join("\n");
+        setPanelContent(finalMessage, {
+          muted: true,
+          chainOfThought: buildAgentChainFromHistory(logs),
+          promptText: goal
+        });
+      }
+
+      finalMessage = "Agent reached max steps without explicit finish.";
+      state.currentTabHasResponse = true;
+      state.currentConversation = trimConversationHistory([
+        ...state.currentConversation,
+        { user: goal, assistant: finalMessage }
+      ]);
+      setPanelContent(finalMessage, {
+        error: true,
+        chainOfThought: buildAgentChainFromHistory(logs),
+        promptText: goal
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Agent mode failed unexpectedly.";
+      finalMessage = `Error: ${message}`;
+      state.currentTabHasResponse = true;
+      state.currentConversation = trimConversationHistory([
+        ...state.currentConversation,
+        { user: goal, assistant: finalMessage }
+      ]);
+      setPanelContent(finalMessage, { error: true, chainOfThought: [], promptText: goal });
+    } finally {
+      removeAgentOverlay();
+      state.agentRunning = false;
+      state.pending = false;
+      state.agentStopRequested = false;
+      updateAgentButtonVisualState();
+      if (requestId === state.requestId) {
+        input.disabled = false;
+        input.focus();
+        input.select();
+      }
+    }
+  }
+
   function requestVisibleTabCapture() {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ type: CAPTURE_MESSAGE_TYPE }, (response) => {
@@ -694,7 +1315,13 @@
   }
 
   async function withTemporarilyHiddenToolboxUi(run) {
-    const uiElements = [getFloatingIcon(), getBar(), getBottomGradient(), getFloatingPopup()];
+    const uiElements = [
+      getFloatingIcon(),
+      getBar(),
+      getBottomGradient(),
+      getFloatingPopup(),
+      getAgentOverlay()
+    ];
     floatingDirections.forEach(({ key }) => {
       const node = state.floatingNodeMap.get(key) || getFloatingNode(key);
       if (node) uiElements.push(node);
@@ -926,6 +1553,13 @@
       if (typeof current.id === "string" && current.id.startsWith("__toolbox_")) {
         return true;
       }
+      if (
+        current.classList &&
+        (current.classList.contains(ARCHIVE_TAB_CLASS) ||
+          Array.from(current.classList).some((className) => className.startsWith("__toolbox_")))
+      ) {
+        return true;
+      }
       current = current.parentElement;
     }
     return false;
@@ -1065,6 +1699,8 @@
   function resizePanelToContent() {
     const panel = getPanel();
     const panelContent = getPanelContent();
+    const bar = getBar();
+    const inputRow = getInputRow();
     if (!panel || !panelContent || !state.expanded) return;
     if (state.panelBodyHidden) {
       panel.style.maxHeight = "40px";
@@ -1077,8 +1713,25 @@
       Math.max(panelContent.scrollHeight + 18, minHeight),
       maxHeight
     );
+    let nextHeight = desiredHeight;
 
-    panel.style.maxHeight = `${Math.round(desiredHeight)}px`;
+    if (bar && inputRow && Number.isFinite(state.barHeight) && state.barHeight > 0) {
+      const barStyles = window.getComputedStyle(bar);
+      const panelStyles = window.getComputedStyle(panel);
+      const paddingY =
+        (parseFloat(barStyles.paddingTop) || 0) + (parseFloat(barStyles.paddingBottom) || 0);
+      const rowGap = parseFloat(barStyles.rowGap || barStyles.gap || "0") || 0;
+      const inputRowHeight = inputRow.getBoundingClientRect().height;
+      const panelMarginTop = parseFloat(panelStyles.marginTop || "0") || 0;
+      const availablePanelHeight = Math.floor(
+        state.barHeight - paddingY - inputRowHeight - rowGap - panelMarginTop
+      );
+      if (availablePanelHeight > 0) {
+        nextHeight = clamp(availablePanelHeight, 40, maxHeight);
+      }
+    }
+
+    panel.style.maxHeight = `${Math.round(nextHeight)}px`;
   }
 
   function renderChainOfThought(chainOfThought, { muted = false } = {}) {
@@ -1177,10 +1830,46 @@
       expandPanel();
       return;
     }
+    const bar = getBar();
+    const previousTop = bar ? bar.getBoundingClientRect().top : null;
     state.panelBodyHidden = !state.panelBodyHidden;
+    if (state.panelBodyHidden) {
+      state.barHeight = null;
+      if (bar) {
+        bar.style.height = "auto";
+      }
+    }
     applyPanelBodyVisibility();
     if (!state.panelBodyHidden) {
       requestAnimationFrame(resizePanelToContent);
+    }
+    if (bar && previousTop !== null && state.panelBodyHidden) {
+      requestAnimationFrame(() => {
+        const nextRect = bar.getBoundingClientRect();
+        const deltaY = nextRect.top - previousTop;
+        if (Math.abs(deltaY) < 1) return;
+        if (state.pinned) {
+          const nextTop = clamp(
+            (parseFloat(bar.style.top) || state.barTop) - deltaY,
+            0,
+            Math.max(0, getDocumentSize().height - bar.offsetHeight - 12)
+          );
+          state.barTop = nextTop;
+          bar.style.top = `${nextTop}px`;
+        } else {
+          const maxBottom = Math.max(
+            0,
+            window.innerHeight - Math.max(BAR_HEIGHT_PX, bar.offsetHeight) - 20
+          );
+          const nextBottom = clamp(
+            (parseFloat(bar.style.bottom) || state.barBottom) + deltaY,
+            0,
+            maxBottom
+          );
+          state.barBottom = nextBottom;
+          bar.style.bottom = `${nextBottom}px`;
+        }
+      });
     }
     updateMinimizeButtonVisualState();
   }
@@ -1288,19 +1977,36 @@
     if (!answerText) return;
 
     const rect = bar.getBoundingClientRect();
-    const initialWidth = clamp(state.barWidth || rect.width || BAR_WIDTH_PX, BAR_MIN_WIDTH_PX, BAR_MAX_WIDTH_PX);
-    const initialLeft = clamp(rect.left, 0, Math.max(0, window.innerWidth - initialWidth));
-    const initialTop = clamp(rect.top, 0, Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, rect.height) - 12));
+    const docSize = getDocumentSize();
+    const initialWidth = clamp(
+      Math.round(rect.width || state.barWidth || BAR_WIDTH_PX),
+      BAR_MIN_WIDTH_PX,
+      BAR_MAX_WIDTH_PX
+    );
+    const initialHeight = clamp(
+      Math.round(rect.height || state.barHeight || BAR_HEIGHT_PX),
+      BAR_MIN_TOTAL_HEIGHT_PX,
+      BAR_MAX_TOTAL_HEIGHT_PX
+    );
+    const initialPinned = Boolean(state.pinned);
+
+    const initialLeft = initialPinned
+      ? clamp(rect.left + window.scrollX, 0, Math.max(0, docSize.width - initialWidth))
+      : clamp(rect.left, 0, Math.max(0, window.innerWidth - initialWidth));
+    const initialTop = initialPinned
+      ? clamp(rect.top + window.scrollY, 0, Math.max(0, docSize.height - initialHeight - 12))
+      : clamp(rect.top, 0, Math.max(0, window.innerHeight - initialHeight - 12));
 
     const archive = document.createElement("div");
     archive.className = ARCHIVE_TAB_CLASS;
     Object.assign(archive.style, {
-      position: "fixed",
+      position: initialPinned ? "absolute" : "fixed",
       left: `${initialLeft}px`,
       top: `${initialTop}px`,
       width: `${initialWidth}px`,
+      height: `${initialHeight}px`,
       borderRadius: `${BAR_RADIUS_PX}px`,
-      background: BAR_BG_UNPINNED,
+      background: initialPinned ? BAR_BG_PINNED : BAR_BG_UNPINNED,
       backdropFilter: BG_BLUR,
       WebkitBackdropFilter: BG_BLUR,
       border: `1px solid ${BORDER_COLOR}`,
@@ -1313,7 +2019,8 @@
       cursor: "grab",
       userSelect: "none",
       touchAction: "none",
-      zIndex: "2147483646"
+      zIndex: "2147483646",
+      overflow: "hidden"
     });
 
     const actionRow = document.createElement("div");
@@ -1321,7 +2028,8 @@
       display: "flex",
       alignItems: "center",
       justifyContent: "flex-end",
-      gap: "6px"
+      gap: "6px",
+      flexShrink: "0"
     });
 
     function createArchiveButton({ title, background, borderColor, textColor = "#0f172a" }) {
@@ -1388,25 +2096,9 @@
     minimizeButton.textContent = "-";
     minimizeButton.style.opacity = "0.96";
 
-    const resizeHandle = document.createElement("div");
-    resizeHandle.title = "Resize tab";
-    Object.assign(resizeHandle.style, {
-      width: "12px",
-      height: "12px",
-      borderRight: "2px solid rgba(148, 163, 184, 0.9)",
-      borderBottom: "2px solid rgba(148, 163, 184, 0.9)",
-      transform: "rotate(0deg)",
-      borderRadius: "2px",
-      cursor: "nwse-resize",
-      marginLeft: "4px",
-      opacity: "0.8"
-    });
-    resizeHandle.addEventListener("pointerdown", (event) => event.stopPropagation());
-
     actionRow.appendChild(pinButton);
     actionRow.appendChild(closeButton);
     actionRow.appendChild(minimizeButton);
-    actionRow.appendChild(resizeHandle);
 
     const responseWrap = document.createElement("div");
     Object.assign(responseWrap.style, {
@@ -1415,8 +2107,11 @@
       gap: "10px",
       border: "1px solid rgba(255, 255, 255, 0.1)",
       borderRadius: "12px",
-      background: PANEL_BG_UNPINNED,
-      padding: "10px"
+      background: initialPinned ? PANEL_BG_PINNED : PANEL_BG_UNPINNED,
+      padding: "10px",
+      flex: "1 1 auto",
+      minHeight: "0",
+      overflowY: "auto"
     });
 
     const promptCopy = document.createElement("div");
@@ -1454,9 +2149,10 @@
 
     const chatRow = document.createElement("div");
     Object.assign(chatRow.style, {
-      display: "flex",
+      display: initialPinned ? "none" : "flex",
       alignItems: "center",
-      gap: "8px"
+      gap: "8px",
+      flexShrink: "0"
     });
 
     const chatInput = document.createElement("input");
@@ -1504,10 +2200,12 @@
     archive.appendChild(chatRow);
     mountTarget.appendChild(archive);
 
-    let archivePinned = false;
+    let archivePinned = initialPinned;
     let archiveMinimized = false;
     let archivePending = false;
     let archiveWidth = initialWidth;
+    let archiveHeight = initialHeight;
+    let archiveStoredHeight = initialHeight;
     let conversationHistory = trimConversationHistory(initialConversation);
     if (conversationHistory.length === 0 && promptText && answerText) {
       conversationHistory.push({ user: promptText, assistant: answerText });
@@ -1536,34 +2234,28 @@
         ? "rgba(253, 224, 71, 1)"
         : "rgba(253, 224, 71, 0.92)";
       minimizeButton.style.transform = archiveMinimized ? "scale(1.03)" : "scale(1)";
-      responseWrap.style.display = archiveMinimized ? "none" : "flex";
+
+      if (archiveMinimized) {
+        responseWrap.style.display = "none";
+        archiveHeight = BAR_MIN_TOTAL_HEIGHT_PX;
+      } else {
+        responseWrap.style.display = "flex";
+        archiveHeight = clamp(archiveStoredHeight, BAR_MIN_TOTAL_HEIGHT_PX, BAR_MAX_TOTAL_HEIGHT_PX);
+      }
+      archive.style.height = `${archiveHeight}px`;
     }
 
     function positionArchiveWithinBounds() {
-      const currentRect = archive.getBoundingClientRect();
+      const leftValue = parseFloat(archive.style.left) || 0;
+      const topValue = parseFloat(archive.style.top) || 0;
+
       if (archivePinned) {
-        const docSize = getDocumentSize();
-        const nextLeft = clamp(
-          currentRect.left + window.scrollX,
-          0,
-          Math.max(0, docSize.width - archiveWidth)
-        );
-        const nextTop = clamp(
-          currentRect.top + window.scrollY,
-          0,
-          Math.max(0, docSize.height - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
-        );
-        archive.style.left = `${nextLeft}px`;
-        archive.style.top = `${nextTop}px`;
+        const currentDocSize = getDocumentSize();
+        archive.style.left = `${clamp(leftValue, 0, Math.max(0, currentDocSize.width - archiveWidth))}px`;
+        archive.style.top = `${clamp(topValue, 0, Math.max(0, currentDocSize.height - archiveHeight - 12))}px`;
       } else {
-        const nextLeft = clamp(currentRect.left, 0, Math.max(0, window.innerWidth - archiveWidth));
-        const nextTop = clamp(
-          currentRect.top,
-          0,
-          Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
-        );
-        archive.style.left = `${nextLeft}px`;
-        archive.style.top = `${nextTop}px`;
+        archive.style.left = `${clamp(leftValue, 0, Math.max(0, window.innerWidth - archiveWidth))}px`;
+        archive.style.top = `${clamp(topValue, 0, Math.max(0, window.innerHeight - archiveHeight - 12))}px`;
       }
     }
 
@@ -1614,32 +2306,16 @@
       event.stopPropagation();
       const nextRect = archive.getBoundingClientRect();
       if (archivePinned) {
-        const nextLeft = clamp(nextRect.left, 0, Math.max(0, window.innerWidth - archiveWidth));
-        const nextTop = clamp(
-          nextRect.top,
-          0,
-          Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
-        );
         archivePinned = false;
         archive.style.position = "fixed";
-        archive.style.left = `${nextLeft}px`;
-        archive.style.top = `${nextTop}px`;
+        archive.style.left = `${clamp(nextRect.left, 0, Math.max(0, window.innerWidth - archiveWidth))}px`;
+        archive.style.top = `${clamp(nextRect.top, 0, Math.max(0, window.innerHeight - archiveHeight - 12))}px`;
       } else {
         const nextDocSize = getDocumentSize();
-        const nextLeft = clamp(
-          nextRect.left + window.scrollX,
-          0,
-          Math.max(0, nextDocSize.width - archiveWidth)
-        );
-        const nextTop = clamp(
-          nextRect.top + window.scrollY,
-          0,
-          Math.max(0, nextDocSize.height - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
-        );
         archivePinned = true;
         archive.style.position = "absolute";
-        archive.style.left = `${nextLeft}px`;
-        archive.style.top = `${nextTop}px`;
+        archive.style.left = `${clamp(nextRect.left + window.scrollX, 0, Math.max(0, nextDocSize.width - archiveWidth))}px`;
+        archive.style.top = `${clamp(nextRect.top + window.scrollY, 0, Math.max(0, nextDocSize.height - archiveHeight - 12))}px`;
       }
       updateArchivePinState();
       positionArchiveWithinBounds();
@@ -1671,100 +2347,122 @@
     });
 
     let activePointerId = null;
-    let startX = 0;
-    let startY = 0;
-    let originLeft = initialLeft;
-    let originTop = initialTop;
-    let hasDragged = false;
+    let interactionMode = "";
+    let resizeDirection = "";
+    let startClientX = 0;
+    let startClientY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+    let startWidth = archiveWidth;
+    let startHeight = archiveHeight;
 
     archive.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       if (event.target instanceof Element && event.target.closest("button, input")) return;
+
+      const rectSnapshot = archive.getBoundingClientRect();
+      const direction = getResizeDirectionForRect(event.clientX, event.clientY, rectSnapshot);
+
       event.preventDefault();
       archive.setPointerCapture(event.pointerId);
       activePointerId = event.pointerId;
-      startX = event.clientX;
-      startY = event.clientY;
-      hasDragged = false;
-      originLeft = parseFloat(archive.style.left) || 0;
-      originTop = parseFloat(archive.style.top) || 0;
-      archive.style.cursor = "grabbing";
+      interactionMode = direction ? "resize" : "drag";
+      resizeDirection = direction;
+      startClientX = event.clientX;
+      startClientY = event.clientY;
+      startWidth = archiveWidth;
+      startHeight = archiveHeight;
+      startLeft = parseFloat(archive.style.left) || 0;
+      startTop = parseFloat(archive.style.top) || 0;
+      archive.style.cursor = interactionMode === "resize" ? getResizeCursor(resizeDirection) : "grabbing";
     });
 
     archive.addEventListener("pointermove", (event) => {
-      if (event.pointerId !== activePointerId) return;
-      const dx = event.clientX - startX;
-      const dy = event.clientY - startY;
-      if (!hasDragged && Math.hypot(dx, dy) > BAR_DRAG_THRESHOLD_PX) {
-        hasDragged = true;
+      if (event.pointerId !== activePointerId) {
+        const direction = getResizeDirectionForRect(event.clientX, event.clientY, archive.getBoundingClientRect());
+        archive.style.cursor = direction ? getResizeCursor(direction) : "grab";
+        return;
       }
-      if (!hasDragged) return;
+      const pointerDx = event.clientX - startClientX;
+      const pointerDy = event.clientY - startClientY;
+
+      if (interactionMode === "drag") {
+        const nextLeftRaw = startLeft + pointerDx;
+        const nextTopRaw = startTop + pointerDy;
+        if (archivePinned) {
+          const nextDocSize = getDocumentSize();
+          archive.style.left = `${clamp(nextLeftRaw, 0, Math.max(0, nextDocSize.width - archiveWidth))}px`;
+          archive.style.top = `${clamp(nextTopRaw, 0, Math.max(0, nextDocSize.height - archiveHeight - 12))}px`;
+        } else {
+          archive.style.left = `${clamp(nextLeftRaw, 0, Math.max(0, window.innerWidth - archiveWidth))}px`;
+          archive.style.top = `${clamp(nextTopRaw, 0, Math.max(0, window.innerHeight - archiveHeight - 12))}px`;
+        }
+        return;
+      }
+
+      if (interactionMode !== "resize") return;
+      let nextWidth = startWidth;
+      let nextHeight = startHeight;
+      let nextLeft = startLeft;
+      let nextTop = startTop;
+
+      if (resizeDirection.includes("e")) {
+        nextWidth = clamp(startWidth + pointerDx, BAR_MIN_WIDTH_PX, BAR_MAX_WIDTH_PX);
+      }
+      if (resizeDirection.includes("w")) {
+        nextWidth = clamp(startWidth - pointerDx, BAR_MIN_WIDTH_PX, BAR_MAX_WIDTH_PX);
+        nextLeft = startLeft + (startWidth - nextWidth);
+      }
+      if (resizeDirection.includes("s")) {
+        nextHeight = clamp(startHeight + pointerDy, BAR_MIN_TOTAL_HEIGHT_PX, BAR_MAX_TOTAL_HEIGHT_PX);
+      }
+      if (resizeDirection.includes("n")) {
+        nextHeight = clamp(startHeight - pointerDy, BAR_MIN_TOTAL_HEIGHT_PX, BAR_MAX_TOTAL_HEIGHT_PX);
+        nextTop = startTop + (startHeight - nextHeight);
+      }
 
       if (archivePinned) {
         const nextDocSize = getDocumentSize();
-        const nextLeft = clamp(originLeft + dx, 0, Math.max(0, nextDocSize.width - archiveWidth));
-        const nextTop = clamp(
-          originTop + dy,
-          0,
-          Math.max(0, nextDocSize.height - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
-        );
-        archive.style.left = `${nextLeft}px`;
-        archive.style.top = `${nextTop}px`;
+        nextLeft = clamp(nextLeft, 0, Math.max(0, nextDocSize.width - nextWidth));
+        nextTop = clamp(nextTop, 0, Math.max(0, nextDocSize.height - nextHeight - 12));
       } else {
-        const nextLeft = clamp(originLeft + dx, 0, Math.max(0, window.innerWidth - archiveWidth));
-        const nextTop = clamp(
-          originTop + dy,
-          0,
-          Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, archive.offsetHeight) - 12)
-        );
-        archive.style.left = `${nextLeft}px`;
-        archive.style.top = `${nextTop}px`;
+        nextLeft = clamp(nextLeft, 0, Math.max(0, window.innerWidth - nextWidth));
+        nextTop = clamp(nextTop, 0, Math.max(0, window.innerHeight - nextHeight - 12));
       }
+
+      archiveWidth = nextWidth;
+      archiveHeight = nextHeight;
+      archiveStoredHeight = archiveMinimized
+        ? Math.max(archiveStoredHeight, archiveHeight)
+        : archiveHeight;
+      archive.style.width = `${archiveWidth}px`;
+      archive.style.height = `${archiveHeight}px`;
+      archive.style.left = `${nextLeft}px`;
+      archive.style.top = `${nextTop}px`;
     });
 
     archive.addEventListener("pointerup", (event) => {
       if (event.pointerId !== activePointerId) return;
       archive.releasePointerCapture(event.pointerId);
       activePointerId = null;
+      interactionMode = "";
+      resizeDirection = "";
       archive.style.cursor = "grab";
+      positionArchiveWithinBounds();
     });
 
     archive.addEventListener("pointercancel", (event) => {
       if (event.pointerId !== activePointerId) return;
       activePointerId = null;
+      interactionMode = "";
+      resizeDirection = "";
       archive.style.cursor = "grab";
-    });
-
-    let resizingPointerId = null;
-    let resizeStartX = 0;
-    let resizeOriginWidth = archiveWidth;
-    resizeHandle.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      resizeHandle.setPointerCapture(event.pointerId);
-      resizingPointerId = event.pointerId;
-      resizeStartX = event.clientX;
-      resizeOriginWidth = archiveWidth;
-    });
-    resizeHandle.addEventListener("pointermove", (event) => {
-      if (event.pointerId !== resizingPointerId) return;
-      const nextWidth = clamp(resizeOriginWidth + (event.clientX - resizeStartX), BAR_MIN_WIDTH_PX, BAR_MAX_WIDTH_PX);
-      archiveWidth = nextWidth;
-      archive.style.width = `${nextWidth}px`;
       positionArchiveWithinBounds();
-    });
-    resizeHandle.addEventListener("pointerup", (event) => {
-      if (event.pointerId !== resizingPointerId) return;
-      resizeHandle.releasePointerCapture(event.pointerId);
-      resizingPointerId = null;
-    });
-    resizeHandle.addEventListener("pointercancel", (event) => {
-      if (event.pointerId !== resizingPointerId) return;
-      resizingPointerId = null;
     });
 
     updateArchivePinState();
     updateArchiveMinimizeState();
+    positionArchiveWithinBounds();
   }
 
   function setPanelContent(
@@ -1878,9 +2576,15 @@
     const prompt = input.value.trim();
     if (!prompt) return;
 
+    if (state.agentModeEnabled) {
+      await runAgentTask(prompt);
+      return;
+    }
+
     const requestId = ++state.requestId;
     state.pending = true;
     input.disabled = true;
+    updateAgentButtonVisualState();
     input.value = "";
     hideBottomGradient();
     const pageContext = buildPageContext();
@@ -1956,6 +2660,7 @@
       if (requestId !== state.requestId) return;
       state.pending = false;
       input.disabled = false;
+      updateAgentButtonVisualState();
       input.focus();
       input.select();
     }
@@ -1978,6 +2683,7 @@
     state.barBottom = BAR_BOTTOM_PX;
     state.barTop = window.scrollY + BAR_BOTTOM_PX;
     state.barWidth = startWidth;
+    state.barHeight = null;
     state.pinned = false;
     state.currentTabHasResponse = false;
     state.currentConversation = [];
@@ -2006,7 +2712,8 @@
       transition: `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`,
       opacity: "0",
       fontFamily: "'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif",
-      boxSizing: "border-box"
+      boxSizing: "border-box",
+      overflow: "hidden"
     });
 
     const inputRow = document.createElement("div");
@@ -2031,6 +2738,48 @@
       flexShrink: "0",
       pointerEvents: "none",
       borderRadius: "50%"
+    });
+
+    const agentButton = document.createElement("button");
+    agentButton.id = PANEL_AGENT_BUTTON_ID;
+    agentButton.type = "button";
+    agentButton.title = "Enable agent mode";
+    agentButton.textContent = "A";
+    Object.assign(agentButton.style, {
+      width: "28px",
+      height: "28px",
+      borderRadius: "9999px",
+      border: "1px solid rgba(153, 246, 228, 0.72)",
+      background: "rgba(45, 212, 191, 0.46)",
+      color: "#083344",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "pointer",
+      padding: "0",
+      fontSize: "12px",
+      fontWeight: "700",
+      lineHeight: "1",
+      opacity: "0.95",
+      transition: "all 150ms ease",
+      flexShrink: "0"
+    });
+    agentButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    agentButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (state.pending || state.agentRunning) return;
+      setAgentModeEnabled(!state.agentModeEnabled);
+      const activeInput = getInput();
+      if (activeInput && !state.pinned) {
+        activeInput.focus();
+      }
+    });
+    agentButton.addEventListener("pointerenter", () => {
+      agentButton.style.opacity = "1";
+    });
+    agentButton.addEventListener("pointerleave", () => {
+      updateAgentButtonVisualState();
     });
 
     const attachmentStrip = document.createElement("div");
@@ -2105,6 +2854,7 @@
     });
 
     inputRow.appendChild(icon);
+    inputRow.appendChild(agentButton);
     inputRow.appendChild(attachmentStrip);
     inputRow.appendChild(input);
     inputRow.appendChild(sendHint);
@@ -2136,7 +2886,9 @@
       color: INPUT_COLOR,
       fontSize: "14px",
       fontFamily: "inherit",
-      lineHeight: "1.6"
+      lineHeight: "1.6",
+      flex: "1 1 auto",
+      minHeight: "0"
     });
 
     /* placeholder content inside panel */
@@ -2276,21 +3028,6 @@
     });
     panelActions.appendChild(minimizeButton);
 
-    const resizeHandle = document.createElement("div");
-    resizeHandle.title = "Resize tab";
-    Object.assign(resizeHandle.style, {
-      width: "11px",
-      height: "11px",
-      borderRight: "2px solid rgba(148, 163, 184, 0.9)",
-      borderBottom: "2px solid rgba(148, 163, 184, 0.9)",
-      borderRadius: "2px",
-      cursor: "nwse-resize",
-      marginLeft: "4px",
-      opacity: "0.85"
-    });
-    resizeHandle.addEventListener("pointerdown", (event) => event.stopPropagation());
-    panelActions.appendChild(resizeHandle);
-
     const prompt = document.createElement("div");
     prompt.id = PANEL_PROMPT_ID;
     Object.assign(prompt.style, {
@@ -2346,8 +3083,14 @@
      *  DRAG  (reposition bar)
      * ================================================================ */
     let activePointerId = null;
+    let interactionMode = "";
+    let resizeDirection = "";
     let pStartX = 0;
     let pStartY = 0;
+    let startRectLeft = 0;
+    let startRectTop = 0;
+    let dragStartWidth = 0;
+    let dragStartHeight = 0;
     let originLeft = 0;
     let originBottom = 0;
     let originTop = 0;
@@ -2355,11 +3098,23 @@
 
     bar.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
+      const rect = bar.getBoundingClientRect();
+      const hoverDirection = getResizeDirectionForRect(e.clientX, e.clientY, rect);
+      const wantsVerticalResize =
+        hoverDirection.includes("n") || hoverDirection.includes("s");
+      const canResize = Boolean(hoverDirection) && (!wantsVerticalResize || state.expanded);
+
       e.preventDefault();
       bar.setPointerCapture(e.pointerId);
       activePointerId = e.pointerId;
+      interactionMode = canResize ? "resize" : "drag";
+      resizeDirection = canResize ? hoverDirection : "";
       pStartX = e.clientX;
       pStartY = e.clientY;
+      startRectLeft = rect.left;
+      startRectTop = rect.top;
+      dragStartWidth = rect.width;
+      dragStartHeight = rect.height;
       hasDragged = false;
 
       originLeft = parseFloat(bar.style.left) || state.barLeft;
@@ -2369,48 +3124,144 @@
         originBottom = parseFloat(bar.style.bottom) || state.barBottom;
       }
 
-      bar.style.cursor = "grabbing";
+      bar.style.cursor =
+        interactionMode === "resize" ? getResizeCursor(resizeDirection) : "grabbing";
       bar.style.transition = "none"; /* disable transition during drag */
     });
 
     bar.addEventListener("pointermove", (e) => {
-      if (e.pointerId !== activePointerId) return;
+      if (e.pointerId !== activePointerId) {
+        const direction = getResizeDirectionForRect(e.clientX, e.clientY, bar.getBoundingClientRect());
+        const wantsVerticalResize = direction.includes("n") || direction.includes("s");
+        const canResize = Boolean(direction) && (!wantsVerticalResize || state.expanded);
+        bar.style.cursor = canResize ? getResizeCursor(direction) : "grab";
+        return;
+      }
 
       const dx = e.clientX - pStartX;
       const dy = e.clientY - pStartY;
 
-      if (!hasDragged && Math.hypot(dx, dy) > BAR_DRAG_THRESHOLD_PX) {
-        hasDragged = true;
-        hideBottomGradient();
+      if (interactionMode === "drag") {
+        if (!hasDragged && Math.hypot(dx, dy) > BAR_DRAG_THRESHOLD_PX) {
+          hasDragged = true;
+          hideBottomGradient();
+        }
+        if (!hasDragged) return;
+
+        if (state.pinned) {
+          const docSize = getDocumentSize();
+          const maxLeft = Math.max(0, docSize.width - state.barWidth);
+          const maxTop = Math.max(0, docSize.height - bar.offsetHeight - 12);
+          const newLeft = clamp(originLeft + dx, 0, maxLeft);
+          const newTop = clamp(originTop + dy, 0, maxTop);
+          bar.style.left = `${newLeft}px`;
+          bar.style.top = `${newTop}px`;
+          state.barLeft = newLeft;
+          state.barTop = newTop;
+        } else {
+          const newLeft = clamp(originLeft + dx, 0, Math.max(0, window.innerWidth - state.barWidth));
+          const maxBottom = Math.max(
+            0,
+            window.innerHeight - Math.max(BAR_HEIGHT_PX, bar.offsetHeight) - 20
+          );
+          const newBottom = clamp(originBottom - dy, 0, maxBottom);
+          bar.style.left = `${newLeft}px`;
+          bar.style.bottom = `${newBottom}px`;
+          state.barLeft = newLeft;
+          state.barBottom = newBottom;
+        }
+        if (state.expanded) resizePanelToContent();
+        return;
       }
-      if (!hasDragged) return;
+
+      if (interactionMode !== "resize") return;
+      hideBottomGradient();
+
+      let nextWidth = dragStartWidth;
+      let nextHeight = dragStartHeight;
+      let nextLeftViewport = startRectLeft;
+      let nextTopViewport = startRectTop;
+
+      if (resizeDirection.includes("e")) {
+        nextWidth = clamp(dragStartWidth + dx, BAR_MIN_WIDTH_PX, BAR_MAX_WIDTH_PX);
+      }
+      if (resizeDirection.includes("w")) {
+        nextWidth = clamp(dragStartWidth - dx, BAR_MIN_WIDTH_PX, BAR_MAX_WIDTH_PX);
+        nextLeftViewport = startRectLeft + (dragStartWidth - nextWidth);
+      }
+      if (state.expanded && resizeDirection.includes("s")) {
+        nextHeight = clamp(
+          dragStartHeight + dy,
+          BAR_MIN_TOTAL_HEIGHT_PX,
+          BAR_MAX_TOTAL_HEIGHT_PX
+        );
+      }
+      if (state.expanded && resizeDirection.includes("n")) {
+        nextHeight = clamp(
+          dragStartHeight - dy,
+          BAR_MIN_TOTAL_HEIGHT_PX,
+          BAR_MAX_TOTAL_HEIGHT_PX
+        );
+        nextTopViewport = startRectTop + (dragStartHeight - nextHeight);
+      }
 
       if (state.pinned) {
         const docSize = getDocumentSize();
-        const maxLeft = Math.max(0, docSize.width - state.barWidth);
-        const maxTop = Math.max(0, docSize.height - bar.offsetHeight - 12);
-        const newLeft = clamp(originLeft + dx, 0, maxLeft);
-        const newTop = clamp(originTop + dy, 0, maxTop);
-        bar.style.left = `${newLeft}px`;
-        bar.style.top = `${newTop}px`;
-        state.barLeft = newLeft;
-        state.barTop = newTop;
+        const nextLeft = clamp(
+          nextLeftViewport + window.scrollX,
+          0,
+          Math.max(0, docSize.width - nextWidth)
+        );
+        const nextTop = clamp(
+          nextTopViewport + window.scrollY,
+          0,
+          Math.max(0, docSize.height - nextHeight - 12)
+        );
+        bar.style.left = `${nextLeft}px`;
+        bar.style.top = `${nextTop}px`;
+        state.barLeft = nextLeft;
+        state.barTop = nextTop;
       } else {
-        const newLeft = Math.max(0, Math.min(originLeft + dx, window.innerWidth - state.barWidth));
-        const maxBottom = Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, bar.offsetHeight) - 20);
-        const newBottom = Math.max(0, Math.min(originBottom - dy, maxBottom));
-        bar.style.left = `${newLeft}px`;
-        bar.style.bottom = `${newBottom}px`;
-        state.barLeft = newLeft;
-        state.barBottom = newBottom;
+        const clampedLeftViewport = clamp(
+          nextLeftViewport,
+          0,
+          Math.max(0, window.innerWidth - nextWidth)
+        );
+        const clampedTopViewport = clamp(
+          nextTopViewport,
+          0,
+          Math.max(0, window.innerHeight - nextHeight - 12)
+        );
+        const nextBottom = clamp(
+          window.innerHeight - clampedTopViewport - nextHeight,
+          0,
+          Math.max(0, window.innerHeight - Math.max(BAR_HEIGHT_PX, nextHeight) - 20)
+        );
+        bar.style.left = `${clampedLeftViewport}px`;
+        bar.style.bottom = `${nextBottom}px`;
+        state.barLeft = clampedLeftViewport;
+        state.barBottom = nextBottom;
       }
-      if (state.expanded) resizePanelToContent();
+
+      state.barWidth = nextWidth;
+      bar.style.width = `${nextWidth}px`;
+
+      if (state.expanded && (resizeDirection.includes("n") || resizeDirection.includes("s"))) {
+        state.barHeight = nextHeight;
+        bar.style.height = `${nextHeight}px`;
+      }
+
+      if (state.expanded) {
+        resizePanelToContent();
+      }
     });
 
     bar.addEventListener("pointerup", (e) => {
       if (e.pointerId !== activePointerId) return;
       bar.releasePointerCapture(e.pointerId);
       activePointerId = null;
+      interactionMode = "";
+      resizeDirection = "";
       bar.style.cursor = "grab";
       /* restore transitions */
       if (state.pinned) {
@@ -2423,6 +3274,8 @@
     bar.addEventListener("pointercancel", (e) => {
       if (e.pointerId !== activePointerId) return;
       activePointerId = null;
+      interactionMode = "";
+      resizeDirection = "";
       bar.style.cursor = "grab";
       if (state.pinned) {
         bar.style.transition = `opacity ${SLIDE_DURATION_MS}ms ease`;
@@ -2431,61 +3284,9 @@
       }
     });
 
-    let resizingPointerId = null;
-    let resizeStartX = 0;
-    let resizeOriginWidth = state.barWidth;
-
-    resizeHandle.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      resizeHandle.setPointerCapture(event.pointerId);
-      resizingPointerId = event.pointerId;
-      resizeStartX = event.clientX;
-      resizeOriginWidth = state.barWidth;
-      hideBottomGradient();
-    });
-
-    resizeHandle.addEventListener("pointermove", (event) => {
-      if (event.pointerId !== resizingPointerId) return;
-      const nextWidth = clamp(
-        resizeOriginWidth + (event.clientX - resizeStartX),
-        BAR_MIN_WIDTH_PX,
-        BAR_MAX_WIDTH_PX
-      );
-      state.barWidth = nextWidth;
-      bar.style.width = `${nextWidth}px`;
-
-      if (state.pinned) {
-        const docSize = getDocumentSize();
-        const maxLeft = Math.max(0, docSize.width - state.barWidth);
-        if (state.barLeft > maxLeft) {
-          state.barLeft = maxLeft;
-          bar.style.left = `${maxLeft}px`;
-        }
-      } else {
-        const maxLeft = Math.max(0, window.innerWidth - state.barWidth);
-        if (state.barLeft > maxLeft) {
-          state.barLeft = maxLeft;
-          bar.style.left = `${maxLeft}px`;
-        }
-      }
-
-      if (state.expanded) resizePanelToContent();
-    });
-
-    resizeHandle.addEventListener("pointerup", (event) => {
-      if (event.pointerId !== resizingPointerId) return;
-      resizeHandle.releasePointerCapture(event.pointerId);
-      resizingPointerId = null;
-    });
-
-    resizeHandle.addEventListener("pointercancel", (event) => {
-      if (event.pointerId !== resizingPointerId) return;
-      resizingPointerId = null;
-    });
-
     /* ── mount ── */
     (document.body || document.documentElement).appendChild(bar);
+    setAgentModeEnabled(state.agentModeEnabled);
     renderAttachmentStrip();
 
     /* slide in */
@@ -2508,7 +3309,10 @@
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        if (state.expanded) {
+        if (state.agentRunning) {
+          state.agentStopRequested = true;
+          setAgentStatus("Agent: stopping...");
+        } else if (state.expanded) {
           collapsePanel();
         } else {
           dismissBar();
@@ -2565,10 +3369,15 @@
 
   function collapsePanel() {
     const panel = getPanel();
+    const bar = getBar();
     if (!panel) return;
 
     state.expanded = false;
     state.panelBodyHidden = false;
+    state.barHeight = null;
+    if (bar) {
+      bar.style.height = "auto";
+    }
     panel.style.maxHeight = "0";
     panel.style.opacity = "0";
     panel.style.marginTop = "0";
@@ -2585,8 +3394,12 @@
 
     state.requestId += 1;
     state.pending = false;
+    state.agentStopRequested = true;
+    state.agentRunning = false;
+    removeAgentOverlay();
     const input = getInput();
     if (input) input.disabled = false;
+    updateAgentButtonVisualState();
 
     /* first collapse panel if open */
     if (state.expanded) collapsePanel();
@@ -2619,6 +3432,7 @@
     if (bar) bar.remove();
     const gradient = getBottomGradient();
     if (gradient) gradient.remove();
+    removeAgentOverlay();
     if (removeFloating) {
       clearImageAttachment();
       removeFloatingUI();
@@ -2640,10 +3454,13 @@
     state.expanded = false;
     state.panelBodyHidden = false;
     state.pending = false;
+    state.agentRunning = false;
+    state.agentStopRequested = false;
     state.pinned = false;
     state.currentTabHasResponse = false;
     state.currentConversation = [];
     state.barTop = 0;
+    state.barHeight = null;
   }
 
   /* ================================================================
@@ -2665,6 +3482,9 @@
 
   function deactivateToolbox() {
     finishScreenCaptureOverlay();
+    state.agentStopRequested = true;
+    state.agentRunning = false;
+    removeAgentOverlay();
     if (state.visible) {
       dismissBar();
       return;
@@ -2673,6 +3493,8 @@
 
   function openNewToolboxTab() {
     finishScreenCaptureOverlay();
+    state.agentStopRequested = true;
+    removeAgentOverlay();
     removeFloatingUI();
 
     const hasActiveTab = state.visible || !!getBar();
@@ -2687,6 +3509,7 @@
 
     state.requestId += 1;
     state.pending = false;
+    state.agentRunning = false;
     clearImageAttachment();
     removeBarUI();
     activateToolbox();
