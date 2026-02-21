@@ -63,8 +63,16 @@ curl http://127.0.0.1:8787/health
 
 1. Abre una web normal (`http`/`https`).
 2. Haz click en el icono de la extensión o usa `Ctrl+Shift+Space`.
-3. Escribe un prompt y pulsa Enter (o botón de envío).
-4. La respuesta aparece en el panel superior de la barra.
+3. Aparece el icono flotante en la página.
+4. Pulsa el nodo `BOTTOM` para abrir el chat.
+5. Escribe un prompt y pulsa Enter (o botón de envío).
+6. La respuesta aparece en el panel superior de la barra.
+
+Captura de pantalla parcial:
+- Pulsa el nodo `LEFT` del icono flotante.
+- Arrastra para seleccionar un área visible de la pantalla.
+- La imagen se adjunta automáticamente al chat.
+- Puedes quitar el adjunto con `x` antes de enviar.
 
 La UI de respuesta ahora incluye:
 - Espacio de respuesta que se expande automáticamente cuando el contenido es largo.
@@ -81,10 +89,16 @@ En cada prompt, la extensión adjunta contexto de la página actual:
 1. `content.js` captura el prompt.
 2. `content.js` extrae contexto visible de la página.
 3. `content.js` envía prompt + contexto a `background.js`.
-4. `background.js` llama a `http://127.0.0.1:8787/api/chat`.
-5. `backend/server.js` llama a OpenAI con `OPENAI_API_KEY`.
-6. El backend devuelve `answer + chainOfThought`.
-7. La UI renderiza respuesta + pasos y ajusta la altura del panel dinámicamente.
+4. `background.js` (opcional) hace `captureVisibleTab` cuando pides recorte parcial.
+5. `background.js` llama a `http://127.0.0.1:8787/api/chat` con prompt + contexto + adjuntos.
+6. `backend/server.js` llama a OpenAI con `OPENAI_API_KEY`.
+7. El backend devuelve `answer + chainOfThought`.
+8. La UI renderiza respuesta + pasos y ajusta la altura del panel dinámicamente.
+
+## Supabase
+
+No es obligatorio para esta funcionalidad: el adjunto de imagen se envía directamente al backend local y de ahí a OpenAI.
+Supabase solo sería necesario si quieres persistir capturas, historial o compartir assets entre dispositivos.
 
 ## Privacidad
 

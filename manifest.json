@@ -4,7 +4,8 @@
   "description": "Toggle a Google Assistant-style search bar on any page via toolbar click or Ctrl+Shift+Space.",
   "version": "0.2.0",
   "permissions": [
-    "tabs"
+    "tabs",
+    "activeTab"
   ],
   "host_permissions": [
     "http://127.0.0.1:8787/*",

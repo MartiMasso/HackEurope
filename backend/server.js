@@ -14,6 +14,9 @@ const CONTEXT_TITLE_MAX_CHARS = 500;
 const CONTEXT_SELECTION_MAX_CHARS = 2000;
 const CONTEXT_ACTIVE_ELEMENT_MAX_CHARS = 2000;
 const CONTEXT_VISIBLE_TEXT_MAX_CHARS = 12000;
+const ATTACHMENT_MAX_COUNT = 2;
+const ATTACHMENT_MAX_DATA_URL_CHARS = 8_000_000;
+const ATTACHMENT_LABEL_MAX_CHARS = 140;
 const CHAIN_MAX_STEPS = 5;
 const CHAIN_MAX_ITEMS = 4;
 const CHAIN_TITLE_MAX_CHARS = 140;
@@ -105,21 +108,86 @@ function buildPageContextText(pageContext) {
   return sections.join("\n\n");
 }
 
-function buildPromptWithContext(prompt, pageContext) {
-  const pageContextText = buildPageContextText(pageContext);
-  if (!pageContextText) return prompt;
+function normalizeImageAttachments(rawAttachments) {
+  if (!Array.isArray(rawAttachments)) return [];
 
-  return [
+  return rawAttachments
+    .map((attachment) => {
+      if (!attachment || typeof attachment !== "object") return null;
+
+      const type = toTrimmedString(attachment.type).toLowerCase();
+      if (type && type !== "image") return null;
+
+      const dataUrl = typeof attachment.dataUrl === "string" ? attachment.dataUrl.trim() : "";
+      if (!dataUrl || dataUrl.length > ATTACHMENT_MAX_DATA_URL_CHARS) return null;
+
+      const mimeMatch = /^data:(image\/(?:png|jpeg|jpg|webp));base64,/i.exec(dataUrl);
+      if (!mimeMatch) return null;
+
+      const mimeType = mimeMatch[1].toLowerCase();
+      const width = Number.isFinite(attachment.width) ? Math.max(1, Math.floor(attachment.width)) : null;
+      const height = Number.isFinite(attachment.height)
+        ? Math.max(1, Math.floor(attachment.height))
+        : null;
+      const label = truncateText(attachment.label, ATTACHMENT_LABEL_MAX_CHARS);
+
+      return {
+        mimeType,
+        dataUrl,
+        width,
+        height,
+        label
+      };
+    })
+    .filter(Boolean)
+    .slice(0, ATTACHMENT_MAX_COUNT);
+}
+
+function buildAttachmentContextText(attachments) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return "";
+
+  return attachments
+    .map((attachment, index) => {
+      const parts = [`Attachment ${index + 1}: ${attachment.mimeType}`];
+      if (attachment.width && attachment.height) {
+        parts.push(`${attachment.width}x${attachment.height}`);
+      }
+      if (attachment.label) {
+        parts.push(`label="${attachment.label}"`);
+      }
+      return parts.join(" | ");
+    })
+    .join("\n");
+}
+
+function buildPromptWithContext(prompt, pageContext, attachments) {
+  const pageContextText = buildPageContextText(pageContext);
+  const attachmentContextText = buildAttachmentContextText(attachments);
+  if (!pageContextText && !attachmentContextText) return prompt;
+
+  const parts = [
     "The user is asking from a webpage.",
-    "Use the page context below when relevant.",
+    "Use the page context and attached screenshots when relevant.",
     "If context is missing, clearly state what is not available.",
-    "",
-    "[Page context]",
-    pageContextText,
-    "",
-    "[User question]",
-    prompt
-  ].join("\n");
+    ""
+  ];
+
+  if (pageContextText) {
+    parts.push("[Page context]");
+    parts.push(pageContextText);
+    parts.push("");
+  }
+
+  if (attachmentContextText) {
+    parts.push("[Attached screenshots]");
+    parts.push(attachmentContextText);
+    parts.push("");
+  }
+
+  parts.push("[User question]");
+  parts.push(prompt);
+
+  return parts.join("\n");
 }
 
 function buildModelInput(promptWithContext) {
@@ -171,7 +239,7 @@ function normalizeChainOfThought(value) {
     .slice(0, CHAIN_MAX_STEPS);
 }
 
-function buildFallbackChainOfThought(pageContext) {
+function buildFallbackChainOfThought(pageContext, attachments = []) {
   const contextItems = [];
   if (toTrimmedString(pageContext?.title)) {
     contextItems.push(`Page title used: ${truncateText(pageContext.title, 110)}`);
@@ -184,6 +252,11 @@ function buildFallbackChainOfThought(pageContext) {
   }
   if (toTrimmedString(pageContext?.visibleText)) {
     contextItems.push("Visible page content was included.");
+  }
+  if (Array.isArray(attachments) && attachments.length > 0) {
+    contextItems.push(
+      `${attachments.length} screenshot attachment${attachments.length > 1 ? "s were" : " was"} included.`
+    );
   }
   if (contextItems.length === 0) {
     contextItems.push("No rich page context was detected; answer based on the user prompt.");
@@ -225,7 +298,7 @@ function extractJsonObject(rawText) {
   }
 }
 
-function parseStructuredResponse(rawText, pageContext) {
+function parseStructuredResponse(rawText, pageContext, attachments = []) {
   const parsed = extractJsonObject(rawText);
   if (parsed && typeof parsed === "object") {
     const answer = toSafeAnswerText(parsed.answer);
@@ -237,7 +310,7 @@ function parseStructuredResponse(rawText, pageContext) {
         answer,
         chainOfThought: chainOfThought.length
           ? chainOfThought
-          : buildFallbackChainOfThought(pageContext)
+          : buildFallbackChainOfThought(pageContext, attachments)
       };
     }
   }
@@ -247,13 +320,13 @@ function parseStructuredResponse(rawText, pageContext) {
 
   return {
     answer,
-    chainOfThought: buildFallbackChainOfThought(pageContext)
+    chainOfThought: buildFallbackChainOfThought(pageContext, attachments)
   };
 }
 
 const app = express();
 
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "12mb" }));
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -289,13 +362,28 @@ app.post("/api/chat", async (req, res) => {
     req.body?.pageContext && typeof req.body.pageContext === "object"
       ? req.body.pageContext
       : null;
-  const promptWithContext = buildPromptWithContext(prompt, pageContext);
+  const imageAttachments = normalizeImageAttachments(req.body?.attachments);
+  const promptWithContext = buildPromptWithContext(prompt, pageContext, imageAttachments);
   const modelInput = buildModelInput(promptWithContext);
   const baseSystemPrompt =
-    "You are a precise assistant integrated into a browser extension. Use the provided page context when relevant and avoid inventing page details.";
+    "You are a precise assistant integrated into a browser extension. Use the provided page context and screenshots when relevant, and avoid inventing details.";
   const fullSystemPrompt = OPENAI_SYSTEM_PROMPT
     ? `${baseSystemPrompt}\n\n${OPENAI_SYSTEM_PROMPT}`
     : baseSystemPrompt;
+
+  const userContent = [{ type: "input_text", text: modelInput }];
+  imageAttachments.forEach((attachment, index) => {
+    userContent.push({
+      type: "input_text",
+      text: attachment.label
+        ? `Attached screenshot ${index + 1}: ${attachment.label}`
+        : `Attached screenshot ${index + 1}`
+    });
+    userContent.push({
+      type: "input_image",
+      image_url: attachment.dataUrl
+    });
+  });
 
   const openAiInput = [
     {
@@ -304,7 +392,7 @@ app.post("/api/chat", async (req, res) => {
     },
     {
       role: "user",
-      content: [{ type: "input_text", text: modelInput }]
+      content: userContent
     }
   ];
 
@@ -349,7 +437,7 @@ app.post("/api/chat", async (req, res) => {
       return;
     }
 
-    const structured = parseStructuredResponse(rawText, pageContext);
+    const structured = parseStructuredResponse(rawText, pageContext, imageAttachments);
     if (!structured) {
       res.status(502).json({
         error: "OpenAI API returned an invalid structured response."

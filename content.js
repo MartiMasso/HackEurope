@@ -9,11 +9,15 @@
   const PANEL_CONTENT_ID = "__toolbox_panel_content__";
   const PANEL_ANSWER_ID = "__toolbox_panel_answer__";
   const PANEL_COT_ID = "__toolbox_panel_chain_of_thought__";
+  const BAR_ATTACHMENTS_ID = "__toolbox_bar_attachments__";
   const FLOATING_ICON_ID = "__toolbox_icon__";
   const FLOATING_NODE_ID_PREFIX = "__toolbox_node__";
   const FLOATING_POPUP_ID = "__toolbox_template_popup__";
+  const SCREENSHOT_OVERLAY_ID = "__toolbox_screen_capture_overlay__";
+  const SCREENSHOT_SELECTION_ID = "__toolbox_screen_capture_selection__";
   const TOGGLE_MESSAGE_TYPE = "TOGGLE_TOOLBOX_BUBBLE";
   const CHAT_MESSAGE_TYPE = "TOOLBOX_CHAT_REQUEST";
+  const CAPTURE_MESSAGE_TYPE = "TOOLBOX_CAPTURE_VISIBLE_TAB";
   const ICON_SRC = chrome.runtime.getURL("assets/icon.png");
 
   /* ================================================================
@@ -30,6 +34,8 @@
   const FLOATING_SCREEN_MARGIN_PX = 16;
   const FLOATING_DRAG_THRESHOLD_PX = 6;
   const FLOATING_QUICK_CLICK_MS = 300;
+  const SCREENSHOT_MIN_SELECTION_PX = 14;
+  const SCREENSHOT_MAX_SIDE_PX = 1400;
   const PANEL_MAX_HEIGHT_PX = 900;
   const PANEL_MIN_HEIGHT_PX = 170;
   const PANEL_MAX_HEIGHT_RATIO = 0.78;
@@ -69,7 +75,10 @@
     floatingCenterY: 0,
     floatingNodeMap: new Map(),
     floatingPopupCloseTimer: null,
-    floatingOnResize: null
+    floatingOnResize: null,
+    imageAttachment: null,
+    screenCaptureCleanup: null,
+    screenCaptureInProgress: false
   };
 
   const floatingDirections = [
@@ -104,6 +113,9 @@
   function getPanelChainOfThought() {
     return getEl(PANEL_COT_ID);
   }
+  function getAttachmentStrip() {
+    return getEl(BAR_ATTACHMENTS_ID);
+  }
   function getBottomGradient() {
     return getEl(BAR_GRADIENT_ID);
   }
@@ -115,6 +127,9 @@
   }
   function getFloatingNode(key) {
     return getEl(`${FLOATING_NODE_ID_PREFIX}_${key}`);
+  }
+  function getScreenCaptureOverlay() {
+    return getEl(SCREENSHOT_OVERLAY_ID);
   }
 
   function ensureBottomGradient() {
@@ -268,11 +283,35 @@
     node.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (key === "bottom") {
+        state.floatingExpanded = false;
+        updateFloatingNodePositions();
+        openChatFromFloating();
+        return;
+      }
+      if (key === "left") {
+        state.floatingExpanded = false;
+        updateFloatingNodePositions();
+        startScreenCaptureSelection();
+        return;
+      }
       showFloatingPopup(label);
     });
 
     state.floatingNodeMap.set(key, node);
     (document.body || document.documentElement).appendChild(node);
+  }
+
+  function openChatFromFloating() {
+    if (state.visible) {
+      const input = getInput();
+      if (input) {
+        input.focus();
+        input.select();
+      }
+      return;
+    }
+    createBar();
   }
 
   function createFloatingIcon() {
@@ -404,6 +443,385 @@
       window.removeEventListener("resize", state.floatingOnResize);
       state.floatingOnResize = null;
     }
+  }
+
+  function toImageAttachmentPayload() {
+    if (!state.imageAttachment || typeof state.imageAttachment.dataUrl !== "string") {
+      return [];
+    }
+
+    return [
+      {
+        type: "image",
+        dataUrl: state.imageAttachment.dataUrl,
+        mimeType: state.imageAttachment.mimeType || "image/jpeg",
+        width: Number.isFinite(state.imageAttachment.width)
+          ? Math.max(1, Math.floor(state.imageAttachment.width))
+          : undefined,
+        height: Number.isFinite(state.imageAttachment.height)
+          ? Math.max(1, Math.floor(state.imageAttachment.height))
+          : undefined,
+        label: "User screen crop"
+      }
+    ];
+  }
+
+  function renderAttachmentStrip() {
+    const strip = getAttachmentStrip();
+    if (!strip) return;
+
+    strip.innerHTML = "";
+
+    if (!state.imageAttachment || !state.imageAttachment.dataUrl) {
+      strip.style.display = "none";
+      return;
+    }
+
+    strip.style.display = "flex";
+
+    const chip = document.createElement("div");
+    Object.assign(chip.style, {
+      display: "flex",
+      alignItems: "center",
+      gap: "6px",
+      border: "1px solid rgba(147, 197, 253, 0.45)",
+      borderRadius: "10px",
+      background: "rgba(30, 58, 138, 0.25)",
+      padding: "3px 6px",
+      maxWidth: "150px",
+      flexShrink: "0"
+    });
+
+    const thumb = document.createElement("img");
+    thumb.src = state.imageAttachment.dataUrl;
+    thumb.alt = "Screenshot attachment";
+    Object.assign(thumb.style, {
+      width: "30px",
+      height: "24px",
+      objectFit: "cover",
+      borderRadius: "6px",
+      border: "1px solid rgba(255, 255, 255, 0.16)",
+      flexShrink: "0"
+    });
+
+    const text = document.createElement("span");
+    text.textContent = "Screenshot";
+    Object.assign(text.style, {
+      color: "rgba(219, 234, 254, 0.95)",
+      fontSize: "11px",
+      lineHeight: "1.2",
+      whiteSpace: "nowrap",
+      overflow: "hidden",
+      textOverflow: "ellipsis"
+    });
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.textContent = "x";
+    Object.assign(removeBtn.style, {
+      width: "18px",
+      height: "18px",
+      borderRadius: "9999px",
+      border: "none",
+      cursor: "pointer",
+      color: "#dbeafe",
+      background: "rgba(30, 64, 175, 0.55)",
+      lineHeight: "1",
+      padding: "0",
+      fontSize: "11px",
+      flexShrink: "0"
+    });
+    removeBtn.addEventListener("pointerdown", (event) => event.stopPropagation());
+    removeBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      state.imageAttachment = null;
+      renderAttachmentStrip();
+    });
+
+    chip.appendChild(thumb);
+    chip.appendChild(text);
+    chip.appendChild(removeBtn);
+    strip.appendChild(chip);
+  }
+
+  function setImageAttachment(attachment) {
+    if (!attachment || typeof attachment.dataUrl !== "string") {
+      state.imageAttachment = null;
+    } else {
+      state.imageAttachment = attachment;
+    }
+    renderAttachmentStrip();
+  }
+
+  function clearImageAttachment() {
+    state.imageAttachment = null;
+    renderAttachmentStrip();
+  }
+
+  function requestVisibleTabCapture() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: CAPTURE_MESSAGE_TYPE }, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error("No se pudo capturar la pantalla visible desde la extensión."));
+          return;
+        }
+
+        if (!response || response.ok !== true || typeof response.dataUrl !== "string") {
+          const errorMessage =
+            response && typeof response.error === "string"
+              ? response.error
+              : "No se recibió una imagen válida de la captura.";
+          reject(new Error(errorMessage));
+          return;
+        }
+
+        resolve(response.dataUrl);
+      });
+    });
+  }
+
+  function loadImageFromDataUrl(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error("No se pudo cargar la imagen capturada."));
+      image.src = dataUrl;
+    });
+  }
+
+  async function cropScreenshotToAttachment(fullDataUrl, rect) {
+    const source = await loadImageFromDataUrl(fullDataUrl);
+    const viewportWidth = Math.max(1, window.innerWidth);
+    const viewportHeight = Math.max(1, window.innerHeight);
+    const scaleX = source.naturalWidth / viewportWidth;
+    const scaleY = source.naturalHeight / viewportHeight;
+
+    let sx = Math.max(0, Math.round(rect.left * scaleX));
+    let sy = Math.max(0, Math.round(rect.top * scaleY));
+    let sw = Math.max(1, Math.round(rect.width * scaleX));
+    let sh = Math.max(1, Math.round(rect.height * scaleY));
+
+    if (sx + sw > source.naturalWidth) sw = source.naturalWidth - sx;
+    if (sy + sh > source.naturalHeight) sh = source.naturalHeight - sy;
+    if (sw < 1 || sh < 1) {
+      throw new Error("El recorte seleccionado es demasiado pequeño.");
+    }
+
+    const resizeFactor = Math.min(1, SCREENSHOT_MAX_SIDE_PX / Math.max(sw, sh));
+    const outWidth = Math.max(1, Math.round(sw * resizeFactor));
+    const outHeight = Math.max(1, Math.round(sh * resizeFactor));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = outWidth;
+    canvas.height = outHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("No se pudo procesar la imagen recortada.");
+    }
+
+    ctx.drawImage(source, sx, sy, sw, sh, 0, 0, outWidth, outHeight);
+
+    const mimeType = "image/jpeg";
+    const dataUrl = canvas.toDataURL(mimeType, 0.86);
+    if (!dataUrl || typeof dataUrl !== "string") {
+      throw new Error("No se pudo convertir la imagen recortada.");
+    }
+
+    return {
+      dataUrl,
+      mimeType,
+      width: outWidth,
+      height: outHeight
+    };
+  }
+
+  function finishScreenCaptureOverlay() {
+    if (typeof state.screenCaptureCleanup === "function") {
+      state.screenCaptureCleanup();
+    }
+  }
+
+  async function withTemporarilyHiddenToolboxUi(run) {
+    const uiElements = [getFloatingIcon(), getBar(), getBottomGradient(), getFloatingPopup()];
+    floatingDirections.forEach(({ key }) => {
+      const node = state.floatingNodeMap.get(key) || getFloatingNode(key);
+      if (node) uiElements.push(node);
+    });
+
+    const previousVisibility = [];
+    uiElements.forEach((element) => {
+      if (!element) return;
+      previousVisibility.push({ element, visibility: element.style.visibility });
+      element.style.visibility = "hidden";
+    });
+
+    try {
+      return await run();
+    } finally {
+      previousVisibility.forEach(({ element, visibility }) => {
+        element.style.visibility = visibility;
+      });
+    }
+  }
+
+  async function captureAndAttachSelection(rect) {
+    try {
+      const fullDataUrl = await withTemporarilyHiddenToolboxUi(() => requestVisibleTabCapture());
+      const attachment = await cropScreenshotToAttachment(fullDataUrl, rect);
+      setImageAttachment(attachment);
+      openChatFromFloating();
+      const input = getInput();
+      if (input) input.focus();
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "No se pudo completar la captura.";
+      openChatFromFloating();
+      if (!state.expanded) expandPanel();
+      setPanelContent(`Error: ${message}`, { error: true, chainOfThought: [] });
+    }
+  }
+
+  function startScreenCaptureSelection() {
+    if (state.screenCaptureInProgress || getScreenCaptureOverlay()) return;
+    const mountTarget = document.body || document.documentElement;
+    if (!mountTarget) return;
+
+    const overlay = document.createElement("div");
+    overlay.id = SCREENSHOT_OVERLAY_ID;
+    Object.assign(overlay.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: "2147483647",
+      cursor: "crosshair",
+      background: "rgba(15, 23, 42, 0.20)",
+      userSelect: "none",
+      touchAction: "none"
+    });
+
+    const helpText = document.createElement("div");
+    helpText.textContent = "Drag to crop the area. Press Esc to cancel.";
+    Object.assign(helpText.style, {
+      position: "fixed",
+      top: "18px",
+      left: "50%",
+      transform: "translateX(-50%)",
+      padding: "8px 12px",
+      borderRadius: "10px",
+      color: "#dbeafe",
+      background: "rgba(15, 23, 42, 0.92)",
+      border: "1px solid rgba(147, 197, 253, 0.35)",
+      fontFamily: "Arial, sans-serif",
+      fontSize: "12px",
+      letterSpacing: "0.2px",
+      pointerEvents: "none"
+    });
+
+    const selection = document.createElement("div");
+    selection.id = SCREENSHOT_SELECTION_ID;
+    Object.assign(selection.style, {
+      position: "fixed",
+      display: "none",
+      border: "2px solid rgba(125, 211, 252, 0.95)",
+      background: "rgba(56, 189, 248, 0.15)",
+      boxShadow: "0 0 0 9999px rgba(15, 23, 42, 0.32)",
+      pointerEvents: "none"
+    });
+
+    overlay.appendChild(helpText);
+    overlay.appendChild(selection);
+    mountTarget.appendChild(overlay);
+    state.screenCaptureInProgress = true;
+
+    let startX = 0;
+    let startY = 0;
+    let pointerId = null;
+    let selecting = false;
+    let currentRect = null;
+
+    function toRect(x1, y1, x2, y2) {
+      const left = Math.max(0, Math.min(x1, x2));
+      const top = Math.max(0, Math.min(y1, y2));
+      const right = Math.min(window.innerWidth, Math.max(x1, x2));
+      const bottom = Math.min(window.innerHeight, Math.max(y1, y2));
+      return {
+        left,
+        top,
+        width: Math.max(0, right - left),
+        height: Math.max(0, bottom - top)
+      };
+    }
+
+    function renderRect(rect) {
+      selection.style.display = "block";
+      selection.style.left = `${rect.left}px`;
+      selection.style.top = `${rect.top}px`;
+      selection.style.width = `${rect.width}px`;
+      selection.style.height = `${rect.height}px`;
+    }
+
+    const onPointerDown = (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      selecting = true;
+      pointerId = event.pointerId;
+      overlay.setPointerCapture(event.pointerId);
+      startX = event.clientX;
+      startY = event.clientY;
+      currentRect = toRect(startX, startY, startX, startY);
+      renderRect(currentRect);
+    };
+
+    const onPointerMove = (event) => {
+      if (!selecting || event.pointerId !== pointerId) return;
+      event.preventDefault();
+      currentRect = toRect(startX, startY, event.clientX, event.clientY);
+      renderRect(currentRect);
+    };
+
+    const onPointerEnd = (event) => {
+      if (!selecting || event.pointerId !== pointerId) return;
+      event.preventDefault();
+      selecting = false;
+      overlay.releasePointerCapture(event.pointerId);
+
+      const rect = currentRect;
+      finishScreenCaptureOverlay();
+      if (
+        !rect ||
+        rect.width < SCREENSHOT_MIN_SELECTION_PX ||
+        rect.height < SCREENSHOT_MIN_SELECTION_PX
+      ) {
+        return;
+      }
+      void captureAndAttachSelection(rect);
+    };
+
+    const onKeyDown = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      finishScreenCaptureOverlay();
+    };
+
+    overlay.addEventListener("pointerdown", onPointerDown);
+    overlay.addEventListener("pointermove", onPointerMove);
+    overlay.addEventListener("pointerup", onPointerEnd);
+    overlay.addEventListener("pointercancel", onPointerEnd);
+    window.addEventListener("keydown", onKeyDown, true);
+
+    state.screenCaptureCleanup = () => {
+      overlay.removeEventListener("pointerdown", onPointerDown);
+      overlay.removeEventListener("pointermove", onPointerMove);
+      overlay.removeEventListener("pointerup", onPointerEnd);
+      overlay.removeEventListener("pointercancel", onPointerEnd);
+      window.removeEventListener("keydown", onKeyDown, true);
+      if (overlay.parentNode) overlay.remove();
+      state.screenCaptureCleanup = null;
+      state.screenCaptureInProgress = false;
+    };
   }
 
   /* ================================================================
@@ -685,28 +1103,33 @@
     if (state.expanded) requestAnimationFrame(resizePanelToContent);
   }
 
-  function requestChatAnswer(prompt, pageContext) {
+  function requestChatAnswer(prompt, pageContext, attachments = []) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: CHAT_MESSAGE_TYPE, prompt, pageContext }, (response) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error("No se pudo contactar con la extensión. Recárgala e inténtalo de nuevo."));
-          return;
-        }
+      chrome.runtime.sendMessage(
+        { type: CHAT_MESSAGE_TYPE, prompt, pageContext, attachments },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(
+              new Error("No se pudo contactar con la extensión. Recárgala e inténtalo de nuevo.")
+            );
+            return;
+          }
 
-        if (!response || response.ok !== true || typeof response.text !== "string") {
-          const errorMessage =
-            response && typeof response.error === "string"
-              ? response.error
-              : "El backend devolvió una respuesta inválida.";
-          reject(new Error(errorMessage));
-          return;
-        }
+          if (!response || response.ok !== true || typeof response.text !== "string") {
+            const errorMessage =
+              response && typeof response.error === "string"
+                ? response.error
+                : "El backend devolvió una respuesta inválida.";
+            reject(new Error(errorMessage));
+            return;
+          }
 
-        resolve({
-          text: response.text,
-          chainOfThought: Array.isArray(response.chainOfThought) ? response.chainOfThought : []
-        });
-      });
+          resolve({
+            text: response.text,
+            chainOfThought: Array.isArray(response.chainOfThought) ? response.chainOfThought : []
+          });
+        }
+      );
     });
   }
 
@@ -721,6 +1144,8 @@
     state.pending = true;
     input.disabled = true;
     const pageContext = buildPageContext();
+    const attachments = toImageAttachmentPayload();
+    const hasImageAttachment = attachments.length > 0;
     const loadingChain = [
       {
         title: "Reading what you are viewing",
@@ -736,22 +1161,30 @@
       {
         title: "Preparing a detailed answer",
         items: [
-          "Grounding the response in page context when relevant.",
+          hasImageAttachment
+            ? "Grounding the response in page context and attached screenshot."
+            : "Grounding the response in page context when relevant.",
           "Building a concise reasoning summary."
         ]
       }
     ];
 
     if (!state.expanded) expandPanel();
-    setPanelContent("Analyzing your request with page context...", {
+    setPanelContent(
+      hasImageAttachment
+        ? "Analyzing your request with page context and screenshot..."
+        : "Analyzing your request with page context...",
+      {
       muted: true,
       chainOfThought: loadingChain
-    });
+      }
+    );
 
     try {
-      const result = await requestChatAnswer(prompt, pageContext);
+      const result = await requestChatAnswer(prompt, pageContext, attachments);
       if (requestId !== state.requestId) return;
       setPanelContent(result.text, { chainOfThought: result.chainOfThought });
+      if (hasImageAttachment) clearImageAttachment();
     } catch (error) {
       if (requestId !== state.requestId) return;
       const message =
@@ -774,7 +1207,6 @@
   function createBar() {
     injectPlaceholderStyle();
     const gradient = ensureBottomGradient();
-    createFloatingIcon();
 
     /* ── container (pill bar) ── */
     const bar = document.createElement("div");
@@ -823,6 +1255,17 @@
       pointerEvents: "none",
       borderRadius: "50%"
     });
+
+    const attachmentStrip = document.createElement("div");
+    attachmentStrip.id = BAR_ATTACHMENTS_ID;
+    Object.assign(attachmentStrip.style, {
+      display: "none",
+      alignItems: "center",
+      gap: "6px",
+      flexShrink: "0",
+      maxWidth: "164px"
+    });
+    attachmentStrip.addEventListener("pointerdown", (event) => event.stopPropagation());
 
     /* ── text input ── */
     const input = document.createElement("input");
@@ -885,6 +1328,7 @@
     });
 
     bar.appendChild(icon);
+    bar.appendChild(attachmentStrip);
     bar.appendChild(input);
     bar.appendChild(sendHint);
 
@@ -1021,6 +1465,7 @@
 
     /* ── mount ── */
     (document.body || document.documentElement).appendChild(bar);
+    renderAttachmentStrip();
 
     /* slide in */
     requestAnimationFrame(() => {
@@ -1093,7 +1538,7 @@
   /* ================================================================
    *  DISMISS BAR  (slide down off-screen, then remove)
    * ================================================================ */
-  function dismissBar() {
+  function dismissBar({ removeFloating = false } = {}) {
     const bar = getBar();
     const gradient = getBottomGradient();
     if (!bar) return;
@@ -1105,7 +1550,6 @@
 
     /* first collapse panel if open */
     if (state.expanded) collapsePanel();
-    removeFloatingUI();
 
     /* restore transition in case it was removed during drag */
     bar.style.transition = `bottom ${SLIDE_DURATION_MS}ms ${EASING}, opacity ${SLIDE_DURATION_MS}ms ease`;
@@ -1117,19 +1561,22 @@
     });
 
     setTimeout(() => {
-      removeBarUI();
+      removeBarUI({ removeFloating });
     }, SLIDE_DURATION_MS + 50);
   }
 
   /* ================================================================
    *  FULL CLEANUP
    * ================================================================ */
-  function removeBarUI() {
+  function removeBarUI({ removeFloating = false } = {}) {
     const bar = getBar();
     if (bar) bar.remove();
     const gradient = getBottomGradient();
     if (gradient) gradient.remove();
-    removeFloatingUI();
+    if (removeFloating) {
+      clearImageAttachment();
+      removeFloatingUI();
+    }
 
     removePlaceholderStyle();
 
@@ -1151,17 +1598,31 @@
   /* ================================================================
    *  TOGGLE ENTRY POINT
    * ================================================================ */
-  function toggleBar() {
+  function activateToolbox() {
+    createFloatingIcon();
+  }
+
+  function deactivateToolbox() {
+    finishScreenCaptureOverlay();
     if (state.visible) {
-      dismissBar();
+      dismissBar({ removeFloating: true });
+      return;
+    }
+    clearImageAttachment();
+    removeFloatingUI();
+  }
+
+  function toggleToolbox() {
+    if (getFloatingIcon()) {
+      deactivateToolbox();
     } else {
-      createBar();
+      activateToolbox();
     }
   }
 
   /* ── message listener (unchanged contract) ── */
   chrome.runtime.onMessage.addListener((message) => {
     if (!message || message.type !== TOGGLE_MESSAGE_TYPE) return;
-    toggleBar();
+    toggleToolbox();
   });
 })();
