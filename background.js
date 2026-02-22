@@ -46,7 +46,14 @@ async function askLocalBackend(prompt, pageContext, attachments = []) {
   };
 }
 
-async function askLocalAgent(goal, pageContext, actionableElements, history = []) {
+async function askLocalAgent(
+  goal,
+  pageContext,
+  actionableElements,
+  history = [],
+  metadata = null,
+  screenshot = null
+) {
   let lastError = null;
 
   for (const endpoint of BACKEND_AGENT_FALLBACK_URLS) {
@@ -55,7 +62,7 @@ async function askLocalAgent(goal, pageContext, actionableElements, history = []
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ goal, pageContext, actionableElements, history })
+      body: JSON.stringify({ goal, pageContext, actionableElements, history, metadata, screenshot })
     });
 
     let payload = null;
@@ -196,8 +203,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       ? message.actionableElements
       : [];
     const history = Array.isArray(message.history) ? message.history : [];
+    const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : null;
+    const screenshot =
+      message.screenshot && typeof message.screenshot === "object" ? message.screenshot : null;
 
-    askLocalAgent(goal, pageContext, actionableElements, history)
+    askLocalAgent(goal, pageContext, actionableElements, history, metadata, screenshot)
       .then((result) => {
         sendResponse({
           ok: true,

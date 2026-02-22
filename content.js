@@ -58,7 +58,11 @@
   const PANEL_MAX_HEIGHT_RATIO = 0.78;
   const PANEL_RADIUS_PX = 18;
   const BAR_DRAG_THRESHOLD_PX = 5;
-  const AGENT_MAX_STEPS = 8;
+  const AGENT_MAX_STEPS = 18;
+  const AGENT_STALL_FORCE_FINISH_THRESHOLD = 3;
+  const AGENT_SNAPSHOT_MAX_SIDE_PX = 1280;
+  const AGENT_SNAPSHOT_QUALITY = 0.72;
+  const AGENT_SNAPSHOT_MIN_STEP_INTERVAL = 2;
   const AGENT_MAX_HISTORY = 10;
   const RESIZE_HIT_AREA_PX = 8;
   const BAR_MIN_TOTAL_HEIGHT_PX = 72;
@@ -758,7 +762,69 @@
     return parts.join(" > ");
   }
 
-  function collectActionableElements() {
+  function extractGoalKeywords(goal) {
+    const text = normalizeText(goal || "").toLowerCase();
+    if (!text) return [];
+
+    const tokens = text
+      .split(/[^a-z0-9áéíóúñüçàèìòùäëïöß]+/i)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3);
+    if (tokens.length === 0) return [];
+
+    const stopwords = new Set([
+      "para",
+      "por",
+      "con",
+      "sin",
+      "que",
+      "find",
+      "buscar",
+      "encuentra",
+      "search",
+      "scroll",
+      "down",
+      "up",
+      "hacia",
+      "abajo",
+      "arriba",
+      "then",
+      "luego",
+      "latest",
+      "email",
+      "correo",
+      "this",
+      "that",
+      "the",
+      "and"
+    ]);
+
+    const unique = [];
+    for (const token of tokens) {
+      if (stopwords.has(token)) continue;
+      if (!unique.includes(token)) unique.push(token);
+      if (unique.length >= 8) break;
+    }
+
+    return unique;
+  }
+
+  function computeGoalMatchScore(labelText, keywords) {
+    if (!Array.isArray(keywords) || keywords.length === 0) return 0;
+    const label = normalizeText(labelText || "").toLowerCase();
+    if (!label) return 0;
+    let score = 0;
+    keywords.forEach((keyword) => {
+      if (!keyword) return;
+      if (label.includes(keyword)) {
+        score += keyword.length >= 6 ? 2 : 1;
+      }
+    });
+    return score;
+  }
+
+  function collectActionableElements(goal = "") {
+    const goalKeywords = extractGoalKeywords(goal);
     const selector =
       'a[href],button,input:not([type="hidden"]),textarea,select,[role="button"],[role="link"],[contenteditable="true"]';
     const nodes = Array.from(document.querySelectorAll(selector));
@@ -791,6 +857,18 @@
       );
       const type = truncateText(normalizeText(element.getAttribute("type") || ""), 40);
       const role = truncateText(normalizeText(element.getAttribute("role") || ""), 40);
+      const name = truncateText(normalizeText(element.getAttribute("name") || ""), 60);
+      const idAttr = truncateText(normalizeText(element.getAttribute("id") || ""), 60);
+      const label = `${text} ${placeholder} ${name}`.toLowerCase();
+      const goalMatchScore = computeGoalMatchScore(
+        `${text} ${placeholder} ${name} ${idAttr}`,
+        goalKeywords
+      );
+      const likelySearch =
+        /\b(search|buscar|filter|filtrar|query|lookup)\b/.test(label) ||
+        type === "search" ||
+        name === "q" ||
+        name === "query";
 
       elements.push({
         id: `el_${elements.length + 1}`,
@@ -800,17 +878,39 @@
         placeholder,
         type,
         role,
+        name,
+        idAttr,
+        goalMatchScore,
+        likelySearch,
         x: Math.round(rect.left + rect.width / 2),
         y: Math.round(rect.top + rect.height / 2)
       });
 
-      if (elements.length >= 28) break;
+      if (elements.length >= 84) break;
     }
 
-    return elements;
+    elements.sort((a, b) => {
+      if (b.goalMatchScore !== a.goalMatchScore) {
+        return b.goalMatchScore - a.goalMatchScore;
+      }
+      if (a.likelySearch !== b.likelySearch) {
+        return a.likelySearch ? -1 : 1;
+      }
+      if (a.y !== b.y) return a.y - b.y;
+      return a.x - b.x;
+    });
+
+    return elements.slice(0, 28);
   }
 
-  function requestAgentStep(goal, pageContext, actionableElements, history) {
+  function requestAgentStep(
+    goal,
+    pageContext,
+    actionableElements,
+    history,
+    metadata = null,
+    screenshot = null
+  ) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage(
         {
@@ -818,7 +918,9 @@
           goal,
           pageContext,
           actionableElements,
-          history
+          history,
+          metadata,
+          screenshot
         },
         (response) => {
           if (chrome.runtime.lastError) {
@@ -991,7 +1093,89 @@
     return false;
   }
 
-  async function executeAgentAction(action, actionableElements) {
+  function dispatchSyntheticEnter(target) {
+    if (!(target instanceof HTMLElement)) return;
+    const eventInit = { key: "Enter", code: "Enter", bubbles: true, cancelable: true };
+    target.dispatchEvent(new KeyboardEvent("keydown", eventInit));
+    target.dispatchEvent(new KeyboardEvent("keypress", eventInit));
+    target.dispatchEvent(new KeyboardEvent("keyup", eventInit));
+
+    const form = target instanceof HTMLInputElement ? target.form : target.closest("form");
+    if (form instanceof HTMLFormElement) {
+      if (typeof form.requestSubmit === "function") {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      }
+    }
+  }
+
+  function shouldAutoSubmitAfterTyping(action, entry, goal) {
+    if (action.submit === true) return true;
+    const label = `${entry?.text || ""} ${entry?.placeholder || ""} ${entry?.name || ""}`.toLowerCase();
+    const goalText = normalizeText(goal || "").toLowerCase();
+    const isSearchLikeGoal =
+      /\b(search|find|lookup|buscar|encuentra|correo|email|inbox|github|repo|repositorio)\b/.test(
+        goalText
+      );
+    const isSearchLikeTarget =
+      Boolean(entry?.likelySearch) ||
+      /\b(search|buscar|query|find|lookup|filtrar|filter)\b/.test(label);
+    return isSearchLikeGoal && isSearchLikeTarget;
+  }
+
+  function goalExplicitlyRequestsRefresh(goal) {
+    const text = normalizeText(goal || "").toLowerCase();
+    return /\b(refresh|reload|recargar|actualizar|actualitza)\b/.test(text);
+  }
+
+  function isRefreshLikeActionTarget(entry) {
+    const label = normalizeText(
+      `${entry?.text || ""} ${entry?.placeholder || ""} ${entry?.name || ""} ${entry?.idAttr || ""}`
+    ).toLowerCase();
+    return /\b(refresh|reload|recargar|actualizar|actualitza)\b/.test(label);
+  }
+
+  function isDangerousNavigationElement(element, entry, goal) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (goalExplicitlyRequestsRefresh(goal)) return false;
+
+    const refreshKeywords = /\b(refresh|reload|recargar|actualizar|actualitza)\b/;
+    const textParts = [
+      entry?.text || "",
+      entry?.placeholder || "",
+      entry?.name || "",
+      entry?.idAttr || "",
+      element.getAttribute("aria-label") || "",
+      element.getAttribute("title") || "",
+      element.getAttribute("data-tooltip") || "",
+      element.id || "",
+      typeof element.className === "string" ? element.className : "",
+      element.textContent || ""
+    ];
+    const label = normalizeText(textParts.join(" ")).toLowerCase();
+    if (refreshKeywords.test(label)) return true;
+
+    const onclickAttr = normalizeText(element.getAttribute("onclick") || "").toLowerCase();
+    if (/(location\.reload|window\.location\.reload|history\.go\(0\))/i.test(onclickAttr)) {
+      return true;
+    }
+
+    const anchor = element.closest("a");
+    if (anchor instanceof HTMLAnchorElement) {
+      const hrefAttr = normalizeText(anchor.getAttribute("href") || "").toLowerCase();
+      if (refreshKeywords.test(hrefAttr)) return true;
+
+      const absoluteHref = anchor.href || "";
+      if (absoluteHref && absoluteHref === window.location.href) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  async function executeAgentAction(action, actionableElements, goal = "") {
     if (!action || typeof action.type !== "string") {
       return { ok: false, summary: "Invalid agent action." };
     }
@@ -1015,7 +1199,16 @@
       if (!resolved) {
         return { ok: false, summary: "Target element not found for click." };
       }
-      const { element } = resolved;
+      const { element, entry } = resolved;
+      if (
+        (isRefreshLikeActionTarget(entry) || isDangerousNavigationElement(element, entry, goal)) &&
+        !goalExplicitlyRequestsRefresh(goal)
+      ) {
+        return {
+          ok: false,
+          summary: "Blocked clicking a refresh-like control to avoid losing page context."
+        };
+      }
       element.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
       await sleep(320);
       const rect = element.getBoundingClientRect();
@@ -1031,7 +1224,7 @@
       if (!resolved) {
         return { ok: false, summary: "Target element not found for typing." };
       }
-      const { element } = resolved;
+      const { element, entry } = resolved;
       element.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
       await sleep(300);
       const rect = element.getBoundingClientRect();
@@ -1043,16 +1236,23 @@
       if (!typed) {
         return { ok: false, summary: "Could not type in the target element." };
       }
-      if (action.submit === true) {
-        element.dispatchEvent(
-          new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true })
-        );
-        element.dispatchEvent(
-          new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true })
-        );
+      if (shouldAutoSubmitAfterTyping(action, entry, goal)) {
+        dispatchSyntheticEnter(element);
       }
       await sleep(300);
       return { ok: true, summary: "Typed into target element." };
+    }
+
+    if (type === "press_enter") {
+      const resolved = resolveActionableElement(action.elementId, actionableElements);
+      const target = resolved?.element || document.activeElement;
+      if (!(target instanceof HTMLElement)) {
+        return { ok: false, summary: "No valid target for Enter key action." };
+      }
+      target.focus();
+      dispatchSyntheticEnter(target);
+      await sleep(260);
+      return { ok: true, summary: "Pressed Enter on target element." };
     }
 
     if (type === "wait") {
@@ -1072,6 +1272,190 @@
     logs.push(entry);
     if (logs.length > AGENT_MAX_HISTORY) {
       logs.splice(0, logs.length - AGENT_MAX_HISTORY);
+    }
+  }
+
+  function toAgentActionSignature(action) {
+    if (!action || typeof action.type !== "string") return "unknown";
+    const parts = [action.type];
+    if (typeof action.elementId === "string" && action.elementId) {
+      parts.push(`el=${action.elementId}`);
+    }
+    if (typeof action.direction === "string" && action.direction) {
+      parts.push(`dir=${action.direction}`);
+    }
+    if (typeof action.text === "string" && action.text.trim()) {
+      parts.push(`text=${truncateText(normalizeText(action.text), 80)}`);
+    }
+    return parts.join("|");
+  }
+
+  function buildAgentContextFingerprint(pageContext) {
+    if (!pageContext || typeof pageContext !== "object") return "";
+    const visible = truncateText(normalizeText(pageContext.visibleText || ""), 1400);
+    const selected = truncateText(normalizeText(pageContext.selectionText || ""), 260);
+    const active = truncateText(normalizeText(pageContext.activeElementText || ""), 260);
+    const title = truncateText(normalizeText(pageContext.title || ""), 180);
+    return [title, selected, active, visible].join("||");
+  }
+
+  function firstMatchIndex(text, patterns) {
+    for (const pattern of patterns) {
+      const match = pattern.exec(text);
+      if (match && Number.isFinite(match.index)) {
+        return match.index;
+      }
+    }
+    return -1;
+  }
+
+  function buildScriptedScrollActions(goal) {
+    const text = normalizeText(goal || "").toLowerCase();
+    if (!text) return [];
+
+    const downPatterns = [
+      /\bscroll\s*down\b/,
+      /\bscroll(?:ea|ear)?[^.]{0,28}\babajo\b/,
+      /\bdesplaz(?:a|ar|ate|arte)[^.]{0,28}\babajo\b/,
+      /\bhacia\s+abajo\b/,
+      /\bbaja(?:r)?(?:\s+la\s+pantalla)?\b/
+    ];
+    const upPatterns = [
+      /\bscroll\s*up\b/,
+      /\bscroll(?:ea|ear)?[^.]{0,28}\barriba\b/,
+      /\bdesplaz(?:a|ar|ate|arte)[^.]{0,28}\barriba\b/,
+      /\bhacia\s+arriba\b/,
+      /\bsube(?:r)?(?:\s+la\s+pantalla)?\b/
+    ];
+
+    const downIndex = firstMatchIndex(text, downPatterns);
+    const upIndex = firstMatchIndex(text, upPatterns);
+    const hasDown = downIndex >= 0;
+    const hasUp = upIndex >= 0;
+
+    if (!hasDown && !hasUp) return [];
+
+    if (hasDown && hasUp) {
+      return downIndex <= upIndex
+        ? [
+            { type: "scroll", direction: "down", amount: 640 },
+            { type: "scroll", direction: "up", amount: 640 }
+          ]
+        : [
+            { type: "scroll", direction: "up", amount: 640 },
+            { type: "scroll", direction: "down", amount: 640 }
+          ];
+    }
+
+    return hasDown
+      ? [{ type: "scroll", direction: "down", amount: 640 }]
+      : [{ type: "scroll", direction: "up", amount: 640 }];
+  }
+
+  function buildAgentFinalPrompt(goal, history, logs, finishMessage, terminationReason) {
+    const stepsText = (Array.isArray(history) ? history : [])
+      .slice(-10)
+      .map((item) => {
+        const stepNumber = Number.isFinite(item.step) ? item.step : "?";
+        const action = truncateText(item.actionSignature || item.action || "unknown", 160);
+        const result = truncateText(item.result || "no result", 220);
+        return `Step ${stepNumber}: ${action} -> ${result}`;
+      })
+      .join("\n");
+
+    const logsText = (Array.isArray(logs) ? logs : [])
+      .slice(-8)
+      .map((line) => truncateText(line, 220))
+      .join("\n");
+
+    const finishText = truncateText(finishMessage || "", 500) || "No explicit finish message.";
+
+    return [
+      "You are writing the final user-facing response for a browser agent run.",
+      "Respond in the same language as the user goal.",
+      "Do not use markdown syntax like #, **, or code fences.",
+      "Be concrete and concise, with this structure:",
+      "Result: ...",
+      "Evidence: ...",
+      "Next step: ...",
+      "If not fully completed, say it clearly and explain what is missing.",
+      "",
+      `[Termination reason] ${terminationReason || "unknown"}`,
+      `[Model finish message] ${finishText}`,
+      "",
+      "[User goal]",
+      truncateText(goal || "", 900) || "No goal.",
+      "",
+      "[Executed steps]",
+      stepsText || "No executed steps.",
+      "",
+      "[Recent agent logs]",
+      logsText || "No logs."
+    ].join("\n");
+  }
+
+  async function finalizeAgentRun(goal, history, logs, finishMessage, terminationReason) {
+    setAgentStatus("Agent: writing final answer...");
+    setPanelContent("Agent finished actions. Preparing final answer...", {
+      muted: true,
+      chainOfThought: buildAgentChainFromHistory(logs),
+      promptText: goal
+    });
+
+    const finalPrompt = buildAgentFinalPrompt(
+      goal,
+      history,
+      logs,
+      finishMessage,
+      terminationReason
+    );
+    const finalPageContext = buildPageContext();
+
+    try {
+      return await requestChatAnswer(finalPrompt, finalPageContext, []);
+    } catch (error) {
+      const fallbackText =
+        truncateText(finishMessage || "", 700) ||
+        "Agent run completed without a final summary. Try refining the instruction.";
+      return {
+        text: fallbackText,
+        chainOfThought: buildAgentChainFromHistory(logs)
+      };
+    }
+  }
+
+  async function captureAgentViewportSnapshot() {
+    try {
+      const fullDataUrl = await withTemporarilyHiddenToolboxUi(() => requestVisibleTabCapture());
+      const source = await loadImageFromDataUrl(fullDataUrl);
+      const resizeFactor = Math.min(
+        1,
+        AGENT_SNAPSHOT_MAX_SIDE_PX / Math.max(source.naturalWidth, source.naturalHeight)
+      );
+      const outWidth = Math.max(1, Math.round(source.naturalWidth * resizeFactor));
+      const outHeight = Math.max(1, Math.round(source.naturalHeight * resizeFactor));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = outWidth;
+      canvas.height = outHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+
+      ctx.drawImage(source, 0, 0, outWidth, outHeight);
+      const mimeType = "image/jpeg";
+      const dataUrl = canvas.toDataURL(mimeType, AGENT_SNAPSHOT_QUALITY);
+      if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) {
+        return null;
+      }
+
+      return {
+        mimeType,
+        dataUrl,
+        width: outWidth,
+        height: outHeight
+      };
+    } catch (error) {
+      return null;
     }
   }
 
@@ -1492,7 +1876,21 @@
 
     const logs = [];
     const history = [];
+    const scriptedActions = buildScriptedScrollActions(goal);
+    const goalKeywords = extractGoalKeywords(goal);
+    let latestAgentScreenshot = null;
+    let latestScreenshotStep = 0;
+    let stallCount = 0;
+    let lastActionSignature = "";
+    let finishMessage = "";
+    let terminationReason = "";
     let finalMessage = "";
+    if (scriptedActions.length > 0) {
+      const labels = scriptedActions
+        .map((action) => (action.direction === "up" ? "scroll up" : "scroll down"))
+        .join(" -> ");
+      trimAgentLogs(logs, `Scripted user actions: ${labels}.`);
+    }
     setPanelContent("Agent mode started. Planning actions on this webpage...", {
       muted: true,
       chainOfThought: [],
@@ -1506,20 +1904,74 @@
           throw new Error("Agent execution stopped.");
         }
 
+        if (scriptedActions.length > 0) {
+          const scriptedAction = scriptedActions.shift();
+          if (!scriptedAction) continue;
+
+          const actionSignature = toAgentActionSignature(scriptedAction);
+          trimAgentLogs(
+            logs,
+            `Step ${step} plan: Executing explicit user instruction (${scriptedAction.direction}).`
+          );
+          setAgentStatus(
+            `Agent step ${step}/${AGENT_MAX_STEPS}: scripted scroll ${scriptedAction.direction}`
+          );
+          const execution = await executeAgentAction(scriptedAction, [], goal);
+          history.push({
+            step,
+            action: scriptedAction.type,
+            actionSignature,
+            result: execution.summary
+          });
+          trimAgentLogs(
+            logs,
+            execution.ok
+              ? `Step ${step} executed: ${execution.summary}`
+              : `Step ${step} warning: ${execution.summary}`
+          );
+          stallCount = execution.ok ? 0 : stallCount + 1;
+          lastActionSignature = actionSignature;
+          finalMessage = logs.join("\n");
+          setPanelContent(finalMessage, {
+            muted: true,
+            chainOfThought: buildAgentChainFromHistory(logs),
+            promptText: goal
+          });
+          continue;
+        }
+
         const pageContext = buildPageContext();
-        const actionableElements = collectActionableElements();
+        const actionableElements = collectActionableElements(goal);
+        const beforeFingerprint = buildAgentContextFingerprint(pageContext);
         const historyPayload = history.slice(-6).map((item) => ({
           step: item.step,
-          action: item.action,
+          action: item.actionSignature || item.action,
           result: item.result
         }));
+        const remainingSteps = AGENT_MAX_STEPS - step;
+        const forceFinish =
+          stallCount >= AGENT_STALL_FORCE_FINISH_THRESHOLD || remainingSteps <= 1;
+        const shouldCaptureSnapshot =
+          step === 1 ||
+          stallCount > 0 ||
+          step - latestScreenshotStep >= AGENT_SNAPSHOT_MIN_STEP_INTERVAL;
 
-        const agentResponse = await requestAgentStep(
-          goal,
-          pageContext,
-          actionableElements,
-          historyPayload
-        );
+        if (shouldCaptureSnapshot) {
+          const snapshot = await captureAgentViewportSnapshot();
+          if (snapshot) {
+            latestAgentScreenshot = snapshot;
+            latestScreenshotStep = step;
+          }
+        }
+
+        const agentResponse = await requestAgentStep(goal, pageContext, actionableElements, historyPayload, {
+          step,
+          maxSteps: AGENT_MAX_STEPS,
+          stallCount,
+          forceFinish,
+          goalKeywords,
+          hasScreenshot: Boolean(latestAgentScreenshot)
+        }, latestAgentScreenshot);
 
         const reasoning =
           typeof agentResponse.reasoning === "string" ? agentResponse.reasoning.trim() : "";
@@ -1532,28 +1984,34 @@
         setAgentStatus(`Agent step ${step}/${AGENT_MAX_STEPS}: ${actionType}`);
 
         if (actionType === "finish") {
-          const finishMessage =
+          finishMessage =
             typeof agentResponse.message === "string" && agentResponse.message.trim()
               ? agentResponse.message.trim()
               : "Task completed.";
           trimAgentLogs(logs, `Done: ${finishMessage}`);
-          finalMessage = finishMessage;
-          setPanelContent(finishMessage, {
-            chainOfThought: buildAgentChainFromHistory(logs),
-            promptText: goal
-          });
-          state.currentTabHasResponse = true;
-          state.currentConversation = trimConversationHistory([
-            ...state.currentConversation,
-            { user: goal, assistant: finishMessage }
-          ]);
-          return;
+          terminationReason = forceFinish ? "forced_finish" : "model_finish";
+          break;
         }
 
-        const execution = await executeAgentAction(action, actionableElements);
+        const actionSignature = toAgentActionSignature(action);
+        const execution = await executeAgentAction(action, actionableElements, goal);
+        const afterContext = buildPageContext();
+        const afterFingerprint = buildAgentContextFingerprint(afterContext);
+        const pageChanged = afterFingerprint !== beforeFingerprint;
+        const repeatedAction = actionSignature === lastActionSignature;
+        const noProgress = !execution.ok || (!pageChanged && repeatedAction);
+
+        if (noProgress || (actionType === "wait" && !pageChanged)) {
+          stallCount += 1;
+        } else {
+          stallCount = 0;
+        }
+
+        lastActionSignature = actionSignature;
         history.push({
           step,
           action: actionType,
+          actionSignature,
           result: execution.summary
         });
         trimAgentLogs(
@@ -1562,6 +2020,12 @@
             ? `Step ${step} executed: ${execution.summary}`
             : `Step ${step} warning: ${execution.summary}`
         );
+        if (stallCount >= AGENT_STALL_FORCE_FINISH_THRESHOLD) {
+          trimAgentLogs(
+            logs,
+            `Step ${step} notice: Agent is stalling (${stallCount}). Forcing closure soon.`
+          );
+        }
 
         finalMessage = logs.join("\n");
         setPanelContent(finalMessage, {
@@ -1571,15 +2035,34 @@
         });
       }
 
-      finalMessage = "Agent reached max steps without explicit finish.";
+      if (!terminationReason) {
+        terminationReason = "max_steps";
+        finishMessage = "Agent reached max steps without explicit finish.";
+        trimAgentLogs(logs, `Done: ${finishMessage}`);
+      }
+
+      if (state.agentStopRequested || requestId !== state.requestId) {
+        throw new Error("Agent execution stopped.");
+      }
+
+      const finalResult = await finalizeAgentRun(
+        goal,
+        history,
+        logs,
+        finishMessage,
+        terminationReason
+      );
+      if (state.agentStopRequested || requestId !== state.requestId) {
+        throw new Error("Agent execution stopped.");
+      }
+      finalMessage = finalResult.text;
       state.currentTabHasResponse = true;
       state.currentConversation = trimConversationHistory([
         ...state.currentConversation,
         { user: goal, assistant: finalMessage }
       ]);
       setPanelContent(finalMessage, {
-        error: true,
-        chainOfThought: buildAgentChainFromHistory(logs),
+        chainOfThought: finalResult.chainOfThought,
         promptText: goal
       });
     } catch (error) {
@@ -1587,13 +2070,18 @@
         error instanceof Error && error.message
           ? error.message
           : "Agent mode failed unexpectedly.";
-      finalMessage = `Error: ${message}`;
+      finalMessage =
+        message === "Agent execution stopped." ? "Agent stopped." : `Error: ${message}`;
       state.currentTabHasResponse = true;
       state.currentConversation = trimConversationHistory([
         ...state.currentConversation,
         { user: goal, assistant: finalMessage }
       ]);
-      setPanelContent(finalMessage, { error: true, chainOfThought: [], promptText: goal });
+      if (message === "Agent execution stopped.") {
+        setPanelContent(finalMessage, { muted: true, chainOfThought: [], promptText: goal });
+      } else {
+        setPanelContent(finalMessage, { error: true, chainOfThought: [], promptText: goal });
+      }
     } finally {
       removeAgentOverlay();
       state.agentRunning = false;
