@@ -12,6 +12,9 @@
   const BAR_ATTACHMENTS_ID = "__toolbox_bar_attachments__";
   const BAR_FEATURE_TOGGLE_ID = "__toolbox_bar_feature_toggle__";
   const BAR_FEATURE_TRAY_ID = "__toolbox_bar_feature_tray__";
+  const BAR_SHELL_ID = "__toolbox_bar_shell__";
+  const BAR_IMAGE_BUTTON_ID = "__toolbox_bar_image_button__";
+  const BAR_SEND_BUTTON_ID = "__toolbox_bar_send_button__";
   const AGENT_OVERLAY_ID = "__toolbox_agent_overlay__";
   const AGENT_CURSOR_ID = "__toolbox_agent_cursor__";
   const AGENT_STATUS_ID = "__toolbox_agent_status__";
@@ -20,13 +23,15 @@
   const FLOATING_POPUP_ID = "__toolbox_template_popup__";
   const SCREENSHOT_OVERLAY_ID = "__toolbox_screen_capture_overlay__";
   const SCREENSHOT_SELECTION_ID = "__toolbox_screen_capture_selection__";
+  const SCREENSHOT_CURSOR_VISUAL_ID = "__toolbox_screen_capture_cursor__";
   const TOGGLE_MESSAGE_TYPE = "TOGGLE_TOOLBOX_BUBBLE";
   const SET_VISIBILITY_MESSAGE_TYPE = "TOOLBOX_SET_VISIBILITY";
   const QUERY_STATE_MESSAGE_TYPE = "TOOLBOX_QUERY_STATE";
   const CHAT_MESSAGE_TYPE = "TOOLBOX_CHAT_REQUEST";
   const AGENT_MESSAGE_TYPE = "TOOLBOX_AGENT_REQUEST";
   const CAPTURE_MESSAGE_TYPE = "TOOLBOX_CAPTURE_VISIBLE_TAB";
-  const ICON_SRC = chrome.runtime.getURL("assets/icon.png");
+  const SET_OPENAI_CONFIG_MESSAGE_TYPE = "TOOLBOX_SET_OPENAI_CONFIG";
+  const ICON_SRC = chrome.runtime.getURL("assets/icons/icon-128.png");
 
   /* ================================================================
    *  DIMENSION & STYLE CONSTANTS
@@ -60,6 +65,8 @@
   const PAGE_CONTEXT_MAX_CHARS = 12000;
   const PAGE_SELECTION_MAX_CHARS = 2000;
   const PAGE_ACTIVE_ELEMENT_MAX_CHARS = 2000;
+  const SHORTCUT_OPEN_CHAT_KEY = "x";
+  const SHORTCUT_SCREENSHOT_KEY = "y";
 
   /* ── animation ── */
   const SLIDE_DURATION_MS = 380;
@@ -86,20 +93,25 @@
     barLeft: 0,        // will be centred on create
     onResize: null,
     onKeydown: null,
+    enabled: false,
+    shortcutKeydown: null,
     floatingExpanded: false,
     floatingCenterX: 0,
     floatingCenterY: 0,
     floatingNodeMap: new Map(),
     floatingPopupCloseTimer: null,
     floatingOnResize: null,
-    imageAttachment: null,
+    imageAttachments: [],
     featureTrayOpen: false,
     agentModeEnabled: false,
     agentRunning: false,
     agentStopRequested: false,
     invalidContextRecoveryTriggered: false,
     screenCaptureCleanup: null,
-    screenCaptureInProgress: false
+    screenCaptureInProgress: false,
+    lastPointerX: null,
+    lastPointerY: null,
+    pointerTrackerHandler: null
   };
 
   const floatingDirections = [
@@ -152,6 +164,15 @@
   function getFeatureTray() {
     return getEl(BAR_FEATURE_TRAY_ID);
   }
+  function getPromptShell() {
+    return getEl(BAR_SHELL_ID);
+  }
+  function getImageButton() {
+    return getEl(BAR_IMAGE_BUTTON_ID);
+  }
+  function getSendButton() {
+    return getEl(BAR_SEND_BUTTON_ID);
+  }
   function getAgentOverlay() {
     return getEl(AGENT_OVERLAY_ID);
   }
@@ -175,6 +196,102 @@
   }
   function getScreenCaptureOverlay() {
     return getEl(SCREENSHOT_OVERLAY_ID);
+  }
+
+  function getComposerHeightPx() {
+    const bar = getBar();
+    if (!bar) return BAR_HEIGHT_PX;
+    const rect = bar.getBoundingClientRect();
+    const height = Number.isFinite(rect.height) ? rect.height : 0;
+    return Math.max(BAR_HEIGHT_PX, Math.round(height) || BAR_HEIGHT_PX);
+  }
+
+  function getBarDismissOffsetPx() {
+    return getComposerHeightPx() + 20;
+  }
+
+  function updatePanelAnchorOffset() {
+    const panel = getPanel();
+    if (!panel) return;
+    const composerHeight = getComposerHeightPx();
+    panel.style.bottom = `${Math.max(0, composerHeight - 1)}px`;
+  }
+
+  function syncPromptBarFrameStyles() {
+    const shell = getPromptShell();
+    const panel = getPanel();
+    const connected = Boolean(state.expanded);
+
+    if (shell instanceof HTMLElement) {
+      shell.style.borderTopLeftRadius = connected ? "0px" : "18px";
+      shell.style.borderTopRightRadius = connected ? "0px" : "18px";
+    }
+
+    if (panel instanceof HTMLElement) {
+      panel.style.borderBottomLeftRadius = connected ? "0px" : `${PANEL_RADIUS_PX}px`;
+      panel.style.borderBottomRightRadius = connected ? "0px" : `${PANEL_RADIUS_PX}px`;
+      panel.style.borderBottomColor = "transparent";
+    }
+  }
+
+  function refreshPromptBarActionStates() {
+    const input = getInput();
+    const sendButton = getSendButton();
+    const imageButton = getImageButton();
+    const promptDisabled = !input || input.disabled || state.pending || state.agentRunning;
+    const hasPrompt = Boolean(input && typeof input.value === "string" && input.value.trim());
+
+    if (sendButton instanceof HTMLButtonElement) {
+      const disabled = promptDisabled || !hasPrompt;
+      sendButton.disabled = disabled;
+      sendButton.classList.toggle("sp-send-off", disabled);
+    }
+
+    if (imageButton instanceof HTMLButtonElement) {
+      const disabled = promptDisabled || state.screenCaptureInProgress;
+      const imageCount = Array.isArray(state.imageAttachments) ? state.imageAttachments.length : 0;
+      const hasImage = imageCount > 0;
+      imageButton.disabled = disabled;
+      imageButton.classList.toggle("sp-image-btn--active", hasImage);
+      imageButton.setAttribute("aria-pressed", hasImage ? "true" : "false");
+
+      let badge = imageButton.querySelector(".sp-image-badge");
+      if (hasImage) {
+        if (!(badge instanceof HTMLElement)) {
+          badge = document.createElement("span");
+          badge.className = "sp-image-badge";
+          imageButton.appendChild(badge);
+        }
+        badge.textContent = imageCount > 9 ? "9+" : String(imageCount);
+      } else if (badge instanceof HTMLElement) {
+        badge.remove();
+      }
+    }
+
+    const agentButtons = document.querySelectorAll('[data-toolbox-feature="agent_mode"]');
+    agentButtons.forEach((button) => {
+      if (!(button instanceof HTMLButtonElement)) return;
+      button.disabled = promptDisabled;
+      button.setAttribute("aria-pressed", state.agentModeEnabled ? "true" : "false");
+    });
+  }
+
+  function rememberPointerPosition(event) {
+    if (!event) return;
+    const x = Number.isFinite(event.clientX) ? event.clientX : null;
+    const y = Number.isFinite(event.clientY) ? event.clientY : null;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    state.lastPointerX = x;
+    state.lastPointerY = y;
+  }
+
+  function ensurePointerTracker() {
+    if (state.pointerTrackerHandler) return;
+    state.pointerTrackerHandler = (event) => {
+      rememberPointerPosition(event);
+    };
+    window.addEventListener("pointermove", state.pointerTrackerHandler, true);
+    window.addEventListener("mousemove", state.pointerTrackerHandler, true);
   }
 
   function ensureBottomGradient() {
@@ -359,6 +476,44 @@
     createBar();
   }
 
+  function matchesToolboxShortcut(event, expectedKey) {
+    if (!event || event.repeat) return false;
+    if (!event.metaKey || !event.shiftKey || event.altKey || event.ctrlKey) return false;
+    if (typeof event.key !== "string") return false;
+    return event.key.toLowerCase() === expectedKey;
+  }
+
+  function ensureShortcutKeydownListener() {
+    if (state.shortcutKeydown) return;
+
+    state.shortcutKeydown = (event) => {
+      if (matchesToolboxShortcut(event, SHORTCUT_OPEN_CHAT_KEY)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (state.screenCaptureInProgress) return;
+        state.enabled = true;
+        openChatFromFloating();
+        return;
+      }
+
+      if (matchesToolboxShortcut(event, SHORTCUT_SCREENSHOT_KEY)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (state.screenCaptureInProgress) return;
+        state.enabled = true;
+        startScreenCaptureSelection();
+      }
+    };
+
+    window.addEventListener("keydown", state.shortcutKeydown, true);
+  }
+
+  function removeShortcutKeydownListener() {
+    if (!state.shortcutKeydown) return;
+    window.removeEventListener("keydown", state.shortcutKeydown, true);
+    state.shortcutKeydown = null;
+  }
+
   function createFloatingIcon() {
     if (getFloatingIcon()) return;
 
@@ -491,24 +646,29 @@
   }
 
   function toImageAttachmentPayload() {
-    if (!state.imageAttachment || typeof state.imageAttachment.dataUrl !== "string") {
+    if (!Array.isArray(state.imageAttachments) || state.imageAttachments.length === 0) {
       return [];
     }
 
-    return [
-      {
+    return state.imageAttachments
+      .filter(
+        (attachment) => attachment && typeof attachment.dataUrl === "string" && attachment.dataUrl
+      )
+      .map((attachment, index) => ({
         type: "image",
-        dataUrl: state.imageAttachment.dataUrl,
-        mimeType: state.imageAttachment.mimeType || "image/jpeg",
-        width: Number.isFinite(state.imageAttachment.width)
-          ? Math.max(1, Math.floor(state.imageAttachment.width))
+        dataUrl: attachment.dataUrl,
+        mimeType: attachment.mimeType || "image/jpeg",
+        width: Number.isFinite(attachment.width)
+          ? Math.max(1, Math.floor(attachment.width))
           : undefined,
-        height: Number.isFinite(state.imageAttachment.height)
-          ? Math.max(1, Math.floor(state.imageAttachment.height))
+        height: Number.isFinite(attachment.height)
+          ? Math.max(1, Math.floor(attachment.height))
           : undefined,
-        label: "User screen crop"
-      }
-    ];
+        label:
+          typeof attachment.label === "string" && attachment.label.trim()
+            ? attachment.label.trim()
+            : `User screen crop ${index + 1}`
+      }));
   }
 
   function renderAttachmentStrip() {
@@ -516,91 +676,115 @@
     if (!strip) return;
 
     strip.innerHTML = "";
+    const attachments = Array.isArray(state.imageAttachments)
+      ? state.imageAttachments.filter(
+          (attachment) =>
+            attachment && typeof attachment.dataUrl === "string" && attachment.dataUrl
+        )
+      : [];
 
-    if (!state.imageAttachment || !state.imageAttachment.dataUrl) {
+    if (attachments.length === 0) {
       strip.style.display = "none";
+      updatePanelAnchorOffset();
+      if (state.expanded) resizePanelToContent();
+      refreshPromptBarActionStates();
       return;
     }
 
     strip.style.display = "flex";
 
-    const chip = document.createElement("div");
-    Object.assign(chip.style, {
-      display: "flex",
-      alignItems: "center",
-      gap: "6px",
-      border: "1px solid rgba(147, 197, 253, 0.45)",
-      borderRadius: "10px",
-      background: "rgba(30, 58, 138, 0.25)",
-      padding: "3px 6px",
-      maxWidth: "150px",
-      flexShrink: "0"
+    attachments.forEach((attachment, index) => {
+      const chip = document.createElement("div");
+      Object.assign(chip.style, {
+        display: "flex",
+        alignItems: "center",
+        gap: "6px",
+        border: "1px solid rgba(71, 85, 105, 0.85)",
+        borderRadius: "10px",
+        background: "rgba(15, 23, 42, 0.9)",
+        padding: "4px 6px",
+        maxWidth: "156px",
+        minWidth: "0",
+        flexShrink: "0"
+      });
+
+      const thumb = document.createElement("img");
+      thumb.src = attachment.dataUrl;
+      thumb.alt = `Attachment ${index + 1}`;
+      Object.assign(thumb.style, {
+        width: "32px",
+        height: "24px",
+        objectFit: "cover",
+        borderRadius: "6px",
+        border: "1px solid rgba(255, 255, 255, 0.16)",
+        flexShrink: "0"
+      });
+
+      const text = document.createElement("span");
+      text.textContent =
+        typeof attachment.label === "string" && attachment.label.trim()
+          ? attachment.label.trim()
+          : `Screenshot ${index + 1}`;
+      Object.assign(text.style, {
+        color: "rgba(226, 232, 240, 0.95)",
+        fontSize: "11px",
+        lineHeight: "1.2",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        minWidth: "0"
+      });
+
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.textContent = "x";
+      Object.assign(removeBtn.style, {
+        width: "18px",
+        height: "18px",
+        borderRadius: "9999px",
+        border: "none",
+        cursor: "pointer",
+        color: "#e2e8f0",
+        background: "rgba(51, 65, 85, 0.9)",
+        lineHeight: "1",
+        padding: "0",
+        fontSize: "11px",
+        flexShrink: "0"
+      });
+      removeBtn.addEventListener("pointerdown", (event) => event.stopPropagation());
+      removeBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!Array.isArray(state.imageAttachments)) {
+          state.imageAttachments = [];
+        } else {
+          state.imageAttachments = state.imageAttachments.filter((_, i) => i !== index);
+        }
+        renderAttachmentStrip();
+      });
+
+      chip.appendChild(thumb);
+      chip.appendChild(text);
+      chip.appendChild(removeBtn);
+      strip.appendChild(chip);
     });
 
-    const thumb = document.createElement("img");
-    thumb.src = state.imageAttachment.dataUrl;
-    thumb.alt = "Screenshot attachment";
-    Object.assign(thumb.style, {
-      width: "30px",
-      height: "24px",
-      objectFit: "cover",
-      borderRadius: "6px",
-      border: "1px solid rgba(255, 255, 255, 0.16)",
-      flexShrink: "0"
-    });
-
-    const text = document.createElement("span");
-    text.textContent = "Screenshot";
-    Object.assign(text.style, {
-      color: "rgba(219, 234, 254, 0.95)",
-      fontSize: "11px",
-      lineHeight: "1.2",
-      whiteSpace: "nowrap",
-      overflow: "hidden",
-      textOverflow: "ellipsis"
-    });
-
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.textContent = "x";
-    Object.assign(removeBtn.style, {
-      width: "18px",
-      height: "18px",
-      borderRadius: "9999px",
-      border: "none",
-      cursor: "pointer",
-      color: "#dbeafe",
-      background: "rgba(30, 64, 175, 0.55)",
-      lineHeight: "1",
-      padding: "0",
-      fontSize: "11px",
-      flexShrink: "0"
-    });
-    removeBtn.addEventListener("pointerdown", (event) => event.stopPropagation());
-    removeBtn.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      state.imageAttachment = null;
-      renderAttachmentStrip();
-    });
-
-    chip.appendChild(thumb);
-    chip.appendChild(text);
-    chip.appendChild(removeBtn);
-    strip.appendChild(chip);
+    updatePanelAnchorOffset();
+    if (state.expanded) resizePanelToContent();
+    refreshPromptBarActionStates();
   }
 
   function setImageAttachment(attachment) {
-    if (!attachment || typeof attachment.dataUrl !== "string") {
-      state.imageAttachment = null;
-    } else {
-      state.imageAttachment = attachment;
+    if (!attachment || typeof attachment.dataUrl !== "string") return;
+    if (!Array.isArray(state.imageAttachments)) {
+      state.imageAttachments = [];
     }
+    state.imageAttachments = [...state.imageAttachments, attachment];
     renderAttachmentStrip();
   }
 
   function clearImageAttachment() {
-    state.imageAttachment = null;
+    state.imageAttachments = [];
     renderAttachmentStrip();
   }
 
@@ -674,6 +858,48 @@
       }
       callback(null, error instanceof Error ? error : new Error(String(error)));
     }
+  }
+
+  function saveDirectOpenAiApiKey(apiKey) {
+    return new Promise((resolve, reject) => {
+      sendRuntimeMessage(
+        { type: SET_OPENAI_CONFIG_MESSAGE_TYPE, apiKey },
+        (response, runtimeError) => {
+          if (runtimeError) {
+            reject(
+              new Error("No se pudo guardar la API key en la extensión. Recárgala e inténtalo.")
+            );
+            return;
+          }
+          if (!response || response.ok !== true) {
+            reject(
+              new Error(
+                response && typeof response.error === "string"
+                  ? response.error
+                  : "No se pudo guardar la API key en la extensión."
+              )
+            );
+            return;
+          }
+          resolve();
+        }
+      );
+    });
+  }
+
+  async function promptAndSaveDirectOpenAiApiKey() {
+    const raw = window.prompt(
+      "No hay backend local disponible. Pega tu OpenAI API key para usar modo directo desde la extensión (se guardará en Chrome local):"
+    );
+    if (raw === null) return false;
+
+    const apiKey = typeof raw === "string" ? raw.trim() : "";
+    if (!apiKey) {
+      throw new Error("No se introdujo ninguna API key.");
+    }
+
+    await saveDirectOpenAiApiKey(apiKey);
+    return true;
   }
 
   function escapeCssValue(value) {
@@ -1456,12 +1682,7 @@
     const buttons = document.querySelectorAll('[data-toolbox-feature="agent_mode"]');
     buttons.forEach((button) => {
       if (!(button instanceof HTMLElement)) return;
-      button.style.background = state.agentModeEnabled
-        ? "rgba(14, 116, 144, 0.35)"
-        : "rgba(30, 64, 175, 0.25)";
-      button.style.borderColor = state.agentModeEnabled
-        ? "rgba(125, 211, 252, 0.6)"
-        : "rgba(191, 219, 254, 0.25)";
+      button.classList.toggle("sp-agent-mode-btn--active", state.agentModeEnabled);
     });
 
     const input = getInput();
@@ -1470,6 +1691,8 @@
         ? "Agent mode: describe the task step-by-step..."
         : "Ask anything…";
     }
+
+    refreshPromptBarActionStates();
   }
 
   async function runAgentTask(goal) {
@@ -1481,6 +1704,7 @@
     state.agentRunning = true;
     state.agentStopRequested = false;
     input.disabled = true;
+    refreshPromptBarActionStates();
 
     if (!state.expanded) expandPanel();
 
@@ -1689,8 +1913,11 @@
       state.pending = false;
       if (requestId === state.requestId) {
         input.disabled = false;
+        refreshPromptBarActionStates();
         input.focus();
         input.select();
+      } else {
+        refreshPromptBarActionStates();
       }
     }
   }
@@ -1832,6 +2059,7 @@
 
   function startScreenCaptureSelection() {
     if (state.screenCaptureInProgress || getScreenCaptureOverlay()) return;
+    ensurePointerTracker();
     const mountTarget = document.body || document.documentElement;
     if (!mountTarget) return;
 
@@ -1846,6 +2074,7 @@
       userSelect: "none",
       touchAction: "none"
     });
+    overlay.style.setProperty("cursor", "crosshair", "important");
 
     const helpText = document.createElement("div");
     helpText.textContent = "Drag to crop the area. Press Esc to cancel.";
@@ -1875,11 +2104,54 @@
       boxShadow: "0 0 0 9999px rgba(15, 23, 42, 0.32)",
       pointerEvents: "none"
     });
+    selection.style.setProperty("cursor", "crosshair", "important");
+
+    const cursorVisual = document.createElement("div");
+    cursorVisual.id = SCREENSHOT_CURSOR_VISUAL_ID;
+    Object.assign(cursorVisual.style, {
+      position: "fixed",
+      left: "0",
+      top: "0",
+      width: "20px",
+      height: "20px",
+      borderRadius: "9999px",
+      border: "2px solid rgba(125, 211, 252, 0.98)",
+      background: "rgba(14, 116, 144, 0.22)",
+      boxShadow: "0 0 0 8px rgba(56, 189, 248, 0.12)",
+      transform: "translate(-9999px, -9999px)",
+      pointerEvents: "none"
+    });
+
+    const cursorDot = document.createElement("div");
+    Object.assign(cursorDot.style, {
+      position: "absolute",
+      left: "50%",
+      top: "50%",
+      width: "4px",
+      height: "4px",
+      borderRadius: "9999px",
+      background: "rgba(224, 242, 254, 0.98)",
+      transform: "translate(-50%, -50%)"
+    });
+    cursorVisual.appendChild(cursorDot);
+
+    function updateCursorVisual(x, y) {
+      const clampedX = clamp(Math.round(Number(x) || 0), 0, Math.max(0, window.innerWidth));
+      const clampedY = clamp(Math.round(Number(y) || 0), 0, Math.max(0, window.innerHeight));
+      cursorVisual.style.transform = `translate(${clampedX - 10}px, ${clampedY - 10}px)`;
+    }
 
     overlay.appendChild(helpText);
     overlay.appendChild(selection);
+    overlay.appendChild(cursorVisual);
     mountTarget.appendChild(overlay);
     state.screenCaptureInProgress = true;
+    refreshPromptBarActionStates();
+
+    updateCursorVisual(
+      Number.isFinite(state.lastPointerX) ? state.lastPointerX : Math.round(window.innerWidth / 2),
+      Number.isFinite(state.lastPointerY) ? state.lastPointerY : Math.round(window.innerHeight / 2)
+    );
 
     let startX = 0;
     let startY = 0;
@@ -1911,6 +2183,8 @@
     const onPointerDown = (event) => {
       if (event.button !== 0) return;
       event.preventDefault();
+      rememberPointerPosition(event);
+      updateCursorVisual(event.clientX, event.clientY);
       selecting = true;
       pointerId = event.pointerId;
       overlay.setPointerCapture(event.pointerId);
@@ -1921,6 +2195,8 @@
     };
 
     const onPointerMove = (event) => {
+      rememberPointerPosition(event);
+      updateCursorVisual(event.clientX, event.clientY);
       if (!selecting || event.pointerId !== pointerId) return;
       event.preventDefault();
       currentRect = toRect(startX, startY, event.clientX, event.clientY);
@@ -1930,6 +2206,8 @@
     const onPointerEnd = (event) => {
       if (!selecting || event.pointerId !== pointerId) return;
       event.preventDefault();
+      rememberPointerPosition(event);
+      updateCursorVisual(event.clientX, event.clientY);
       selecting = false;
       overlay.releasePointerCapture(event.pointerId);
 
@@ -1967,6 +2245,7 @@
       if (overlay.parentNode) overlay.remove();
       state.screenCaptureCleanup = null;
       state.screenCaptureInProgress = false;
+      refreshPromptBarActionStates();
     };
   }
 
@@ -1978,11 +2257,210 @@
     const style = document.createElement("style");
     style.id = PLACEHOLDER_ID;
     style.textContent = `
-      #${BAR_INPUT_ID}::placeholder {
-        color: rgba(156, 163, 175, 0.7);
-        font-style: italic;
+      #${BAR_CONTAINER_ID} .sp-shell {
+        --sp-slate-950: hsl(222.2 84% 4.9%);
+        --sp-slate-900: hsl(222.2 47.4% 11.2%);
+        --sp-slate-800: hsl(215.4 31.8% 16.9%);
+        --sp-slate-700: hsl(215.3 19.3% 34.5%);
+        --sp-accent: hsl(24.6 95% 53.1%);
+        --sp-accent-hover: hsl(21.8 90% 48%);
+        --sp-text: hsl(210 40% 96%);
+        --sp-text-dim: hsl(215 20.2% 65.1%);
+        width: 100%;
+        min-height: ${BAR_HEIGHT_PX}px;
+        background: var(--sp-slate-950);
+        border: 1px solid hsl(215.4 31.8% 16.9% / 0.9);
+        border-radius: 18px;
+        opacity: 0.96;
+        box-shadow:
+          0 12px 28px hsl(222.2 84% 4.9% / 0.55),
+          0 3px 10px hsl(222.2 84% 4.9% / 0.38);
+        overflow: hidden;
+        font-family: Inter, "Segoe UI", system-ui, sans-serif;
+        font-size: 13px;
+        color: var(--sp-text);
+        display: flex;
+        flex-direction: column;
       }
-      #${BAR_INPUT_ID}:focus {
+
+      #${BAR_CONTAINER_ID} .sp-shell * {
+        box-sizing: border-box;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-bar {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+        padding: 9px 10px;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-logo {
+        width: 24px;
+        height: 24px;
+        border-radius: 7px;
+        object-fit: contain;
+        display: block;
+        flex-shrink: 0;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-agent-mode-btn,
+      #${BAR_CONTAINER_ID} .sp-image-btn {
+        flex-shrink: 0;
+        width: 30px;
+        height: 30px;
+        border: none;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        background: transparent;
+        color: var(--sp-text-dim);
+        transition: background 0.11s ease, color 0.11s ease, box-shadow 0.11s ease;
+        padding: 0;
+        margin: 0;
+        position: relative;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-agent-mode-btn:hover:not(:disabled),
+      #${BAR_CONTAINER_ID} .sp-image-btn:hover:not(:disabled) {
+        background: hsl(215.4 31.8% 16.9% / 0.95);
+        color: var(--sp-text);
+      }
+
+      #${BAR_CONTAINER_ID} .sp-agent-mode-btn:disabled,
+      #${BAR_CONTAINER_ID} .sp-image-btn:disabled {
+        color: rgba(255,255,255,0.22);
+        cursor: not-allowed;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-agent-mode-btn--active {
+        background: hsl(24.6 95% 53.1% / 0.14);
+        color: hsl(24.6 95% 62%);
+        box-shadow: inset 0 0 0 1px hsl(24.6 95% 53.1% / 0.18);
+      }
+
+      #${BAR_CONTAINER_ID} .sp-input-row {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        background: hsl(222.2 47.4% 11.2% / 0.95);
+        box-shadow: inset 0 0 0 1px hsl(215.4 31.8% 16.9% / 0.9);
+        border-radius: 11px;
+        transition: background 0.12s ease, box-shadow 0.12s ease;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-input-row:focus-within {
+        background: hsl(222.2 47.4% 12.6% / 0.98);
+        box-shadow: inset 0 0 0 1px hsl(215.3 19.3% 34.5% / 0.55);
+      }
+
+      #${BAR_CONTAINER_ID} .sp-input {
+        flex: 1;
+        min-width: 0;
+        background: transparent;
+        color: var(--sp-text);
+        border: none;
+        outline: none;
+        padding: 8px 10px;
+        font-size: 13.5px;
+        font-family: inherit;
+        line-height: 1.5;
+        display: block;
+        margin: 0;
+      }
+
+      #${BAR_INPUT_ID}::placeholder {
+        color: var(--sp-text-dim);
+      }
+
+      #${BAR_CONTAINER_ID} .sp-input:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-image-btn--active {
+        background: hsl(24.6 95% 53.1% / 0.14);
+        color: hsl(24.6 95% 62%);
+      }
+
+      #${BAR_CONTAINER_ID} .sp-image-badge {
+        position: absolute;
+        top: -3px;
+        right: -2px;
+        min-width: 15px;
+        height: 15px;
+        border-radius: 999px;
+        padding: 0 4px;
+        background: var(--sp-accent);
+        color: #fff;
+        font-size: 9px;
+        line-height: 15px;
+        font-weight: 700;
+        text-align: center;
+        box-shadow: 0 0 0 2px var(--sp-slate-950);
+      }
+
+      #${BAR_CONTAINER_ID} .sp-send-btn {
+        flex-shrink: 0;
+        width: 30px;
+        height: 30px;
+        margin-right: 3px;
+        border: none;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        background: var(--sp-accent);
+        color: #fff;
+        transition: background 0.11s ease, color 0.11s ease;
+        padding: 0;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-send-btn:hover:not(:disabled):not(.sp-send-off) {
+        background: var(--sp-accent-hover);
+      }
+
+      #${BAR_CONTAINER_ID} .sp-send-off {
+        background: hsl(24.6 95% 53.1% / 0.48) !important;
+        color: rgba(255, 255, 255, 0.84) !important;
+        cursor: not-allowed;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-agent-mode-btn svg,
+      #${BAR_CONTAINER_ID} .sp-image-btn svg,
+      #${BAR_CONTAINER_ID} .sp-send-btn svg {
+        pointer-events: none;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-attachment-strip {
+        scrollbar-width: thin;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-attachment-strip::-webkit-scrollbar {
+        height: 6px;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-attachment-strip::-webkit-scrollbar-thumb {
+        background: rgba(71, 85, 105, 0.8);
+        border-radius: 999px;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-attachment-strip::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      #${BAR_CONTAINER_ID} button:focus-visible,
+      #${BAR_CONTAINER_ID} .sp-image-btn:focus-visible,
+      #${BAR_CONTAINER_ID} .sp-send-btn:focus-visible {
+        outline: 2px solid hsl(24.6 95% 53.1% / 0.55);
+        outline-offset: 1px;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-input:focus-visible {
         outline: none;
       }
     `;
@@ -2139,9 +2617,10 @@
   function computePanelMaxHeight() {
     const bar = getBar();
     const barBottom = bar ? parseFloat(bar.style.bottom) || state.barBottom : state.barBottom;
+    const composerHeight = getComposerHeightPx();
     const availableAboveBar = Math.max(
       110,
-      window.innerHeight - Math.max(0, barBottom) - BAR_HEIGHT_PX - 24
+      window.innerHeight - Math.max(0, barBottom) - composerHeight - 24
     );
     const ratioCap = Math.floor(window.innerHeight * PANEL_MAX_HEIGHT_RATIO);
     return Math.max(110, Math.min(PANEL_MAX_HEIGHT_PX, ratioCap, availableAboveBar));
@@ -2270,7 +2749,11 @@
               response && typeof response.error === "string"
                 ? response.error
                 : "El backend devolvió una respuesta inválida.";
-            reject(new Error(errorMessage));
+            const error = new Error(errorMessage);
+            if (response && typeof response.errorCode === "string") {
+              error.code = response.errorCode;
+            }
+            reject(error);
             return;
           }
 
@@ -2298,6 +2781,7 @@
     const requestId = ++state.requestId;
     state.pending = true;
     input.disabled = true;
+    refreshPromptBarActionStates();
     const pageContext = buildPageContext();
     const attachments = toImageAttachmentPayload();
     const hasImageAttachment = attachments.length > 0;
@@ -2341,16 +2825,42 @@
       setPanelContent(result.text, { chainOfThought: result.chainOfThought });
       if (hasImageAttachment) clearImageAttachment();
     } catch (error) {
+      let finalError = error;
+
+      if (
+        finalError &&
+        typeof finalError === "object" &&
+        finalError.code === "EXTENSION_OPENAI_KEY_REQUIRED"
+      ) {
+        try {
+          const saved = await promptAndSaveDirectOpenAiApiKey();
+          if (saved) {
+            setPanelContent("API key guardada. Reintentando en modo directo...", {
+              muted: true,
+              chainOfThought: []
+            });
+            const retryResult = await requestChatAnswer(prompt, pageContext, attachments);
+            if (requestId !== state.requestId) return;
+            setPanelContent(retryResult.text, { chainOfThought: retryResult.chainOfThought });
+            if (hasImageAttachment) clearImageAttachment();
+            return;
+          }
+        } catch (setupError) {
+          finalError = setupError;
+        }
+      }
+
       if (requestId !== state.requestId) return;
       const message =
-        error instanceof Error && error.message
-          ? error.message
+        finalError instanceof Error && finalError.message
+          ? finalError.message
           : "No se pudo obtener respuesta.";
       setPanelContent(`Error: ${message}`, { error: true, chainOfThought: [] });
     } finally {
       if (requestId !== state.requestId) return;
       state.pending = false;
       input.disabled = false;
+      refreshPromptBarActionStates();
       input.focus();
       input.select();
     }
@@ -2363,7 +2873,7 @@
     injectPlaceholderStyle();
     const gradient = ensureBottomGradient();
 
-    /* ── container (pill bar) ── */
+    /* ── container (positioned draggable host) ── */
     const bar = document.createElement("div");
     bar.id = BAR_CONTAINER_ID;
 
@@ -2373,20 +2883,12 @@
 
     Object.assign(bar.style, {
       position: "fixed",
-      bottom: `-${BAR_HEIGHT_PX + 20}px`,  /* starts off-screen */
+      bottom: `-${getBarDismissOffsetPx()}px`,  /* starts off-screen */
       left: `${startLeft}px`,
       width: `${BAR_WIDTH_PX}px`,
-      height: `${BAR_HEIGHT_PX}px`,
+      minHeight: `${BAR_HEIGHT_PX}px`,
       borderRadius: `${BAR_RADIUS_PX}px`,
-      background: BG_COLOR,
-      backdropFilter: BG_BLUR,
-      WebkitBackdropFilter: BG_BLUR,
-      border: `1px solid ${BORDER_COLOR}`,
-      boxShadow: "0 12px 40px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255,255,255,0.04) inset",
-      display: "flex",
-      alignItems: "center",
-      gap: "12px",
-      padding: "0 16px",
+      background: "transparent",
       zIndex: "2147483647",
       cursor: "grab",
       userSelect: "none",
@@ -2397,130 +2899,68 @@
       boxSizing: "border-box"
     });
 
-    /* ── feature toggle icon ── */
-    const featureToggle = document.createElement("button");
-    featureToggle.id = BAR_FEATURE_TOGGLE_ID;
-    featureToggle.type = "button";
-    featureToggle.setAttribute("aria-label", "Open tools");
-    featureToggle.setAttribute("aria-expanded", "false");
-    Object.assign(featureToggle.style, {
-      width: "34px",
-      height: "34px",
-      borderRadius: "50%",
-      border: "1px solid rgba(148, 163, 184, 0.28)",
-      background: "rgba(99, 102, 241, 0.20)",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: "0",
-      margin: "0",
-      cursor: "pointer",
-      flexShrink: "0",
-      transition: "background 150ms ease, border-color 150ms ease"
-    });
-    featureToggle.addEventListener("pointerdown", (event) => event.stopPropagation());
-
-    const icon = document.createElement("img");
-    icon.src = ICON_SRC;
-    icon.alt = "Toolbox";
-    icon.draggable = false;
-    Object.assign(icon.style, {
-      width: "24px",
-      height: "24px",
-      objectFit: "contain",
-      pointerEvents: "none",
-      borderRadius: "50%"
-    });
-    featureToggle.appendChild(icon);
-
-    const featureTray = document.createElement("div");
-    featureTray.id = BAR_FEATURE_TRAY_ID;
-    Object.assign(featureTray.style, {
-      display: "flex",
-      alignItems: "center",
-      gap: "6px",
-      overflow: "hidden",
-      maxWidth: "0px",
-      opacity: "0",
-      transform: "translateX(-8px)",
-      transition: "max-width 220ms ease, opacity 180ms ease, transform 180ms ease, margin-right 180ms ease",
-      marginRight: "0",
-      border: "1px solid rgba(148, 163, 184, 0.2)",
-      borderRadius: "9999px",
-      background:
-        "linear-gradient(135deg, rgba(30, 41, 59, 0.92) 0%, rgba(15, 23, 42, 0.84) 100%)",
-      padding: "4px 7px",
-      flexShrink: "0"
-    });
-    featureTray.addEventListener("pointerdown", (event) => event.stopPropagation());
-
-    chatFeatureItems.forEach((item) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.title = item.label;
-      button.dataset.toolboxFeature = item.key;
-      button.setAttribute("aria-label", item.label);
-      button.innerHTML = item.icon;
-      Object.assign(button.style, {
-        width: `${FEATURE_BUTTON_SIZE_PX}px`,
-        height: `${FEATURE_BUTTON_SIZE_PX}px`,
-        borderRadius: "9999px",
-        border: "1px solid rgba(191, 219, 254, 0.25)",
-        background: "rgba(30, 64, 175, 0.25)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "0",
-        margin: "0",
-        cursor: "pointer",
-        transition: "transform 120ms ease, background 150ms ease, border-color 150ms ease"
-      });
-      button.addEventListener("pointerdown", (event) => event.stopPropagation());
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (item.key === "agent_mode") {
-          if (state.pending || state.agentRunning) return;
-          setAgentModeEnabled(!state.agentModeEnabled);
-          if (state.featureTrayOpen) {
-            setFeatureTrayOpen(false);
-          }
-        }
-      });
-      button.addEventListener("pointerenter", () => {
-        button.style.background = "rgba(59, 130, 246, 0.34)";
-        button.style.borderColor = "rgba(191, 219, 254, 0.48)";
-        button.style.transform = "translateY(-1px)";
-      });
-      button.addEventListener("pointerleave", () => {
-        button.style.background = "rgba(30, 64, 175, 0.25)";
-        button.style.borderColor = "rgba(191, 219, 254, 0.25)";
-        button.style.transform = "translateY(0)";
-      });
-      featureTray.appendChild(button);
+    const shell = document.createElement("div");
+    shell.id = BAR_SHELL_ID;
+    shell.className = "sp-shell";
+    Object.assign(shell.style, {
+      width: "100%"
     });
 
-    featureToggle.addEventListener("click", (event) => {
+    const shellBar = document.createElement("div");
+    shellBar.className = "sp-bar";
+
+    const logo = document.createElement("img");
+    logo.className = "sp-logo";
+    logo.src = ICON_SRC;
+    logo.alt = "Toolbox";
+    logo.draggable = false;
+
+    const agentModeButton = document.createElement("button");
+    agentModeButton.type = "button";
+    agentModeButton.className = "sp-agent-mode-btn";
+    agentModeButton.dataset.toolboxFeature = "agent_mode";
+    agentModeButton.setAttribute("aria-label", "Toggle agent mode");
+    agentModeButton.innerHTML = `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="7" y="8" width="10" height="9" rx="2"></rect>
+        <path d="M12 4v2"></path>
+        <path d="M9.5 2.5h5"></path>
+        <path d="M9 12h.01"></path>
+        <path d="M15 12h.01"></path>
+        <path d="M10 15c.7.5 1.3.75 2 .75s1.3-.25 2-.75"></path>
+      </svg>
+    `;
+    agentModeButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    agentModeButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      setFeatureTrayOpen(!state.featureTrayOpen);
+      if (state.pending || state.agentRunning) return;
+      setAgentModeEnabled(!state.agentModeEnabled);
     });
 
     const attachmentStrip = document.createElement("div");
     attachmentStrip.id = BAR_ATTACHMENTS_ID;
+    attachmentStrip.className = "sp-attachment-strip";
     Object.assign(attachmentStrip.style, {
       display: "none",
       alignItems: "center",
-      gap: "6px",
-      flexShrink: "0",
-      maxWidth: "164px"
+      gap: "8px",
+      width: "100%",
+      overflowX: "auto",
+      overflowY: "hidden",
+      padding: "8px 10px 0"
     });
     attachmentStrip.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+    const inputRow = document.createElement("div");
+    inputRow.className = "sp-input-row";
+    inputRow.addEventListener("pointerdown", (event) => event.stopPropagation());
 
     /* ── text input ── */
     const input = document.createElement("input");
     input.id = BAR_INPUT_ID;
     input.type = "text";
+    input.className = "sp-input";
     input.placeholder = state.agentModeEnabled
       ? "Agent mode: describe the task step-by-step..."
       : "Ask anything…";
@@ -2528,21 +2968,15 @@
     input.spellcheck = false;
 
     Object.assign(input.style, {
-      flex: "1",
-      height: "100%",
-      border: "none",
-      background: "transparent",
-      color: INPUT_COLOR,
-      fontSize: "15px",
-      fontFamily: "inherit",
-      padding: "0",
-      margin: "0",
-      caretColor: ACCENT,
+      caretColor: "hsl(24.6 95% 53.1%)",
       cursor: "text"
     });
 
     /* prevent drag when interacting with input */
     input.addEventListener("pointerdown", (e) => e.stopPropagation());
+    input.addEventListener("input", () => {
+      refreshPromptBarActionStates();
+    });
 
     /* Enter → expand panel */
     input.addEventListener("keydown", (e) => {
@@ -2552,38 +2986,57 @@
       }
     });
 
-    /* ── send hint icon (decorative) ── */
-    const sendHint = document.createElement("div");
-    Object.assign(sendHint.style, {
-      width: "32px",
-      height: "32px",
-      borderRadius: "50%",
-      background: "rgba(99, 102, 241, 0.25)",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      flexShrink: "0",
-      cursor: "pointer",
-      transition: "background 150ms ease"
+    const imageButton = document.createElement("button");
+    imageButton.id = BAR_IMAGE_BUTTON_ID;
+    imageButton.type = "button";
+    imageButton.className = "sp-image-btn";
+    imageButton.setAttribute("aria-label", "Attach screenshot crop");
+    imageButton.title = "Attach screenshot crop";
+    imageButton.innerHTML = `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 15v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3"></path>
+        <path d="M16 4h5v5"></path>
+        <path d="M21 3l-8 8"></path>
+        <path d="M7 14l2.4-2.4a1.5 1.5 0 0 1 2.1 0L15 15"></path>
+        <path d="M13.5 13.5l1-1a1.5 1.5 0 0 1 2.1 0L19 15"></path>
+      </svg>
+    `;
+    imageButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    imageButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (state.pending || state.agentRunning || state.screenCaptureInProgress) return;
+      startScreenCaptureSelection();
     });
-    sendHint.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${INPUT_COLOR}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
-    sendHint.addEventListener("pointerdown", (e) => e.stopPropagation());
-    sendHint.addEventListener("click", (e) => {
+
+    const sendButton = document.createElement("button");
+    sendButton.id = BAR_SEND_BUTTON_ID;
+    sendButton.type = "button";
+    sendButton.className = "sp-send-btn";
+    sendButton.setAttribute("aria-label", "Send prompt");
+    sendButton.innerHTML = `
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <line x1="22" y1="2" x2="11" y2="13"></line>
+        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+      </svg>
+    `;
+    sendButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    sendButton.addEventListener("click", (e) => {
+      e.preventDefault();
       e.stopPropagation();
       submitPrompt();
     });
-    sendHint.addEventListener("pointerenter", () => {
-      sendHint.style.background = "rgba(99, 102, 241, 0.45)";
-    });
-    sendHint.addEventListener("pointerleave", () => {
-      sendHint.style.background = "rgba(99, 102, 241, 0.25)";
-    });
 
-    bar.appendChild(featureToggle);
-    bar.appendChild(featureTray);
-    bar.appendChild(attachmentStrip);
-    bar.appendChild(input);
-    bar.appendChild(sendHint);
+    inputRow.appendChild(input);
+    inputRow.appendChild(imageButton);
+    inputRow.appendChild(sendButton);
+
+    shellBar.appendChild(logo);
+    shellBar.appendChild(agentModeButton);
+    shellBar.appendChild(inputRow);
+    shell.appendChild(attachmentStrip);
+    shell.appendChild(shellBar);
+    bar.appendChild(shell);
 
     /* ── results panel (hidden) ── */
     const panel = document.createElement("div");
@@ -2591,18 +3044,18 @@
 
     Object.assign(panel.style, {
       position: "absolute",
-      bottom: `${BAR_HEIGHT_PX + 8}px`,
+      bottom: `${BAR_HEIGHT_PX - 1}px`,
       left: "0",
       width: "100%",
       maxHeight: "0",
       overflowX: "hidden",
       overflowY: "auto",
-      borderRadius: `${PANEL_RADIUS_PX}px`,
+      borderRadius: `${PANEL_RADIUS_PX}px ${PANEL_RADIUS_PX}px 0 0`,
       background: BG_COLOR,
       backdropFilter: BG_BLUR,
       WebkitBackdropFilter: BG_BLUR,
-      border: `1px solid ${BORDER_COLOR}`,
-      boxShadow: "0 -8px 32px rgba(0, 0, 0, 0.35)",
+      border: "1px solid transparent",
+      boxShadow: "0 -12px 28px rgba(0, 0, 0, 0.28)",
       transition: `max-height ${EXPAND_DURATION_MS}ms ${EASING}, opacity ${EXPAND_DURATION_MS}ms ease`,
       opacity: "0",
       boxSizing: "border-box",
@@ -2691,7 +3144,11 @@
       if (!hasDragged) return;
 
       const newLeft = Math.max(0, Math.min(originLeft + dx, window.innerWidth - BAR_WIDTH_PX));
-      const newBottom = Math.max(0, Math.min(originBottom - dy, window.innerHeight - BAR_HEIGHT_PX - 20));
+      const composerHeight = getComposerHeightPx();
+      const newBottom = Math.max(
+        0,
+        Math.min(originBottom - dy, window.innerHeight - composerHeight - 20)
+      );
 
       bar.style.left = `${newLeft}px`;
       bar.style.bottom = `${newBottom}px`;
@@ -2721,6 +3178,9 @@
     setFeatureTrayOpen(false);
     setAgentModeEnabled(state.agentModeEnabled);
     renderAttachmentStrip();
+    updatePanelAnchorOffset();
+    syncPromptBarFrameStyles();
+    bar.style.bottom = `-${getBarDismissOffsetPx()}px`;
 
     /* slide in */
     requestAnimationFrame(() => {
@@ -2767,6 +3227,7 @@
         b.style.left = `${maxLeft}px`;
       }
       if (state.expanded) resizePanelToContent();
+      updatePanelAnchorOffset();
     };
     window.addEventListener("resize", state.onResize);
 
@@ -2781,8 +3242,11 @@
     if (!panel) return;
 
     state.expanded = true;
+    panel.style.borderColor = BORDER_COLOR;
     panel.style.opacity = "1";
     panel.style.padding = "0 20px";
+    updatePanelAnchorOffset();
+    syncPromptBarFrameStyles();
     requestAnimationFrame(resizePanelToContent);
   }
 
@@ -2791,8 +3255,10 @@
     if (!panel) return;
 
     state.expanded = false;
+    panel.style.borderColor = "transparent";
     panel.style.maxHeight = "0";
     panel.style.opacity = "0";
+    syncPromptBarFrameStyles();
   }
 
   /* ================================================================
@@ -2809,6 +3275,7 @@
     removeAgentOverlay();
     const input = getInput();
     if (input) input.disabled = false;
+    refreshPromptBarActionStates();
 
     /* first collapse panel if open */
     if (state.expanded) collapsePanel();
@@ -2819,7 +3286,7 @@
 
     requestAnimationFrame(() => {
       if (gradient) gradient.style.opacity = "0";
-      bar.style.bottom = `-${BAR_HEIGHT_PX + 20}px`;
+      bar.style.bottom = `-${getBarDismissOffsetPx()}px`;
       bar.style.opacity = "0";
     });
 
@@ -2865,10 +3332,12 @@
    *  TOGGLE ENTRY POINT
    * ================================================================ */
   function activateToolbox() {
-    createFloatingIcon();
+    state.enabled = true;
+    ensureShortcutKeydownListener();
   }
 
   function deactivateToolbox() {
+    state.enabled = false;
     finishScreenCaptureOverlay();
     state.agentStopRequested = true;
     removeAgentOverlay();
@@ -2882,7 +3351,7 @@
   }
 
   function toggleToolbox() {
-    if (getFloatingIcon()) {
+    if (state.enabled) {
       deactivateToolbox();
     } else {
       activateToolbox();
@@ -2923,5 +3392,6 @@
     }
   });
 
+  ensureShortcutKeydownListener();
   syncInitialToolboxVisibility();
 })();
