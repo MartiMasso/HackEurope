@@ -2453,6 +2453,120 @@
         background: transparent;
       }
 
+      #${PANEL_ANSWER_ID} {
+        white-space: normal !important;
+        overflow-wrap: anywhere;
+      }
+
+      #${PANEL_ANSWER_ID} p {
+        margin: 0 0 14px;
+      }
+
+      #${PANEL_ANSWER_ID} p:last-child {
+        margin-bottom: 0;
+      }
+
+      #${PANEL_ANSWER_ID} h1,
+      #${PANEL_ANSWER_ID} h2,
+      #${PANEL_ANSWER_ID} h3,
+      #${PANEL_ANSWER_ID} h4,
+      #${PANEL_ANSWER_ID} h5,
+      #${PANEL_ANSWER_ID} h6 {
+        margin: 14px 0 10px;
+        line-height: 1.25;
+        font-weight: 700;
+        color: rgba(248, 250, 252, 0.98);
+      }
+
+      #${PANEL_ANSWER_ID} h1:first-child,
+      #${PANEL_ANSWER_ID} h2:first-child,
+      #${PANEL_ANSWER_ID} h3:first-child,
+      #${PANEL_ANSWER_ID} h4:first-child,
+      #${PANEL_ANSWER_ID} h5:first-child,
+      #${PANEL_ANSWER_ID} h6:first-child {
+        margin-top: 0;
+      }
+
+      #${PANEL_ANSWER_ID} h1 { font-size: 1.3em; }
+      #${PANEL_ANSWER_ID} h2 { font-size: 1.2em; }
+      #${PANEL_ANSWER_ID} h3 { font-size: 1.1em; }
+      #${PANEL_ANSWER_ID} h4 { font-size: 1.02em; }
+      #${PANEL_ANSWER_ID} h5,
+      #${PANEL_ANSWER_ID} h6 { font-size: 0.96em; }
+
+      #${PANEL_ANSWER_ID} ul,
+      #${PANEL_ANSWER_ID} ol {
+        margin: 0 0 14px;
+        padding-left: 22px;
+      }
+
+      #${PANEL_ANSWER_ID} li {
+        margin: 0 0 7px;
+      }
+
+      #${PANEL_ANSWER_ID} li:last-child {
+        margin-bottom: 0;
+      }
+
+      #${PANEL_ANSWER_ID} strong {
+        color: rgba(248, 250, 252, 0.98);
+        font-weight: 700;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-thinking {
+        display: block;
+        min-height: 0;
+        padding: 2px 0 0;
+      }
+
+      #${BAR_CONTAINER_ID} .sp-thinking-label {
+        display: inline-block;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        color: rgba(226, 232, 240, 0.36);
+        background-image: linear-gradient(
+          110deg,
+          rgba(226, 232, 240, 0.28) 0%,
+          rgba(226, 232, 240, 0.45) 30%,
+          rgba(255, 255, 255, 0.98) 46%,
+          rgba(226, 232, 240, 0.45) 62%,
+          rgba(226, 232, 240, 0.28) 100%
+        );
+        background-size: 230% 100%;
+        background-position: 140% 0;
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        animation: toolboxTextShimmer 1.8s linear infinite;
+      }
+
+      @keyframes toolboxTextShimmer {
+        0% {
+          background-position: 140% 0;
+        }
+        100% {
+          background-position: -40% 0;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #${BAR_CONTAINER_ID} .sp-thinking-label {
+          animation: none;
+          background-position: 50% 0;
+        }
+      }
+
+      #${PANEL_ID} {
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+
+      #${PANEL_ID}::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+      }
+
       #${BAR_CONTAINER_ID} button:focus-visible,
       #${BAR_CONTAINER_ID} .sp-image-btn:focus-visible,
       #${BAR_CONTAINER_ID} .sp-send-btn:focus-visible {
@@ -2614,6 +2728,110 @@
       .slice(0, 6);
   }
 
+  function appendInlineMarkdownLike(parent, text) {
+    const source = typeof text === "string" ? text : "";
+    if (!source) return;
+
+    let index = 0;
+    while (index < source.length) {
+      const boldStart = source.indexOf("**", index);
+      if (boldStart < 0) {
+        parent.appendChild(document.createTextNode(source.slice(index)));
+        break;
+      }
+
+      const boldEnd = source.indexOf("**", boldStart + 2);
+      if (boldEnd < 0) {
+        parent.appendChild(document.createTextNode(source.slice(index)));
+        break;
+      }
+
+      if (boldStart > index) {
+        parent.appendChild(document.createTextNode(source.slice(index, boldStart)));
+      }
+
+      const strong = document.createElement("strong");
+      strong.textContent = source.slice(boldStart + 2, boldEnd);
+      parent.appendChild(strong);
+      index = boldEnd + 2;
+    }
+  }
+
+  function renderAnswerMarkdownLike(container, text) {
+    if (!(container instanceof HTMLElement)) return;
+    const source = typeof text === "string" ? text : "";
+    container.innerHTML = "";
+
+    if (!source) return;
+
+    const lines = source.replace(/\r\n?/g, "\n").split("\n");
+    let i = 0;
+
+    while (i < lines.length) {
+      const line = lines[i];
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        i += 1;
+        continue;
+      }
+
+      const headingMatch = /^\s*(#{1,6})\s+(.+?)\s*$/.exec(line);
+      if (headingMatch) {
+        const level = Math.min(6, Math.max(1, headingMatch[1].length));
+        const headingEl = document.createElement(`h${level}`);
+        appendInlineMarkdownLike(headingEl, headingMatch[2]);
+        container.appendChild(headingEl);
+        i += 1;
+        continue;
+      }
+
+      const unorderedMatch = /^\s*[-*]\s+(.+)$/.exec(line);
+      const orderedMatch = /^\s*\d+[.)]\s+(.+)$/.exec(line);
+
+      if (unorderedMatch || orderedMatch) {
+        const isOrdered = Boolean(orderedMatch);
+        const listEl = document.createElement(isOrdered ? "ol" : "ul");
+
+        while (i < lines.length) {
+          const current = lines[i];
+          const currentMatch = isOrdered
+            ? /^\s*\d+[.)]\s+(.+)$/.exec(current)
+            : /^\s*[-*]\s+(.+)$/.exec(current);
+          if (!currentMatch) break;
+
+          const li = document.createElement("li");
+          appendInlineMarkdownLike(li, currentMatch[1]);
+          listEl.appendChild(li);
+          i += 1;
+        }
+
+        container.appendChild(listEl);
+        continue;
+      }
+
+      const paragraphLines = [];
+      while (i < lines.length) {
+        const current = lines[i];
+        const currentTrimmed = current.trim();
+        if (!currentTrimmed) break;
+        if (/^\s*#{1,6}\s+.+$/.test(current)) break;
+        if (/^\s*[-*]\s+.+$/.test(current) || /^\s*\d+[.)]\s+.+$/.test(current)) break;
+        paragraphLines.push(current);
+        i += 1;
+      }
+
+      const p = document.createElement("p");
+      paragraphLines.forEach((paragraphLine, index) => {
+        appendInlineMarkdownLike(p, paragraphLine);
+        if (index < paragraphLines.length - 1) {
+          p.appendChild(document.createElement("br"));
+        }
+      });
+      container.appendChild(p);
+    }
+  }
+
   function computePanelMaxHeight() {
     const bar = getBar();
     const barBottom = bar ? parseFloat(bar.style.bottom) || state.barBottom : state.barBottom;
@@ -2648,60 +2866,23 @@
     chainWrap.innerHTML = "";
     const steps = normalizeChainOfThought(chainOfThought);
 
-    if (steps.length === 0) {
+    const showThinking = muted && steps.length > 0;
+    if (!showThinking) {
       chainWrap.style.display = "none";
       return;
     }
 
     chainWrap.style.display = "flex";
 
-    steps.forEach((step, index) => {
-      const details = document.createElement("details");
-      if (index === 0) details.open = true;
+    const thinking = document.createElement("div");
+    thinking.className = "sp-thinking";
 
-      Object.assign(details.style, {
-        border: "1px solid rgba(255, 255, 255, 0.08)",
-        borderRadius: "12px",
-        background: "rgba(15, 23, 42, 0.42)",
-        overflow: "hidden",
-        opacity: muted ? "0.75" : "1"
-      });
+    const label = document.createElement("span");
+    label.className = "sp-thinking-label";
+    label.textContent = "Thinking...";
 
-      const summary = document.createElement("summary");
-      summary.textContent = step.title;
-      Object.assign(summary.style, {
-        cursor: "pointer",
-        fontSize: "13px",
-        fontWeight: "600",
-        padding: "10px 12px",
-        color: "rgba(226, 232, 240, 0.95)",
-        listStylePosition: "inside",
-        userSelect: "none"
-      });
-
-      const list = document.createElement("ul");
-      Object.assign(list.style, {
-        margin: "0",
-        padding: "0 18px 12px 30px",
-        color: "rgba(203, 213, 225, 0.95)"
-      });
-
-      step.items.forEach((item) => {
-        const li = document.createElement("li");
-        li.textContent = item;
-        li.style.marginBottom = "6px";
-        li.style.fontSize = "13px";
-        li.style.lineHeight = "1.45";
-        list.appendChild(li);
-      });
-
-      details.appendChild(summary);
-      details.appendChild(list);
-      details.addEventListener("toggle", () => {
-        if (state.expanded) requestAnimationFrame(resizePanelToContent);
-      });
-      chainWrap.appendChild(details);
-    });
+    thinking.appendChild(label);
+    chainWrap.appendChild(thinking);
   }
 
   function setPanelContent(text, { muted = false, error = false, chainOfThought = [] } = {}) {
@@ -2717,11 +2898,19 @@
       return;
     }
 
-    answer.textContent = text;
-    answer.style.opacity = muted ? "0.75" : "1";
-    answer.style.color = error ? "#fca5a5" : INPUT_COLOR;
-    answer.style.borderColor = error ? "rgba(252, 165, 165, 0.45)" : "rgba(255, 255, 255, 0.08)";
-    answer.style.background = error ? "rgba(127, 29, 29, 0.26)" : "rgba(15, 23, 42, 0.35)";
+    const hasThinkingSteps = normalizeChainOfThought(chainOfThought).length > 0;
+    const showThinkingOnly = muted && hasThinkingSteps && !error;
+
+    if (showThinkingOnly) {
+      answer.style.display = "none";
+    } else {
+      answer.style.display = "block";
+      renderAnswerMarkdownLike(answer, text);
+      answer.style.opacity = muted ? "0.75" : "1";
+      answer.style.color = error ? "#fca5a5" : INPUT_COLOR;
+      answer.style.borderColor = error ? "rgba(252, 165, 165, 0.45)" : "rgba(255, 255, 255, 0.08)";
+      answer.style.background = error ? "rgba(127, 29, 29, 0.26)" : "rgba(15, 23, 42, 0.35)";
+    }
 
     renderChainOfThought(chainOfThought, { muted });
 
@@ -2903,7 +3092,9 @@
     shell.id = BAR_SHELL_ID;
     shell.className = "sp-shell";
     Object.assign(shell.style, {
-      width: "100%"
+      width: "100%",
+      position: "relative",
+      zIndex: "1"
     });
 
     const shellBar = document.createElement("div");
@@ -3063,7 +3254,8 @@
       color: INPUT_COLOR,
       fontSize: "14px",
       fontFamily: "inherit",
-      lineHeight: "1.6"
+      lineHeight: "1.6",
+      zIndex: "0"
     });
 
     /* placeholder content inside panel */
